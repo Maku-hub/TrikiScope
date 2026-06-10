@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# Recorded data
+triki_data.csv
+triki_events.log
+*.csv
+
+# OS / editor
+.vscode/
+.idea/
+Thumbs.db

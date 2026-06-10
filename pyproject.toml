@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trikiscope"
+version = "0.1.0"
+description = "Terminalowy inspektor BLE oraz podgląd IMU/orientacji dla urządzenia Żabka Triki (Python)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "TrikiScope" }]
+dependencies = [
+    "bleak>=0.22.0",
+    "textual>=0.79.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+trikiscope = "trikiscope.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["trikiscope*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
