@@ -28,6 +28,7 @@ from .ble import (
     TrikiBleClient,
 )
 from .config import AppConfig
+from .games import Game, build_games
 from .gestures import GestureDetector
 from .orientation import Quaternion, VisualOrientation, create_orientation_mapper
 from .protocol import BleNotificationProcessor, ImuSample
@@ -50,7 +51,7 @@ class AppState:
 class TrikiApp(App):
     CSS = """
     Screen { background: $surface; }
-    #overview-body, #gatt-body, #imu-body, #orient-body { padding: 1 2; }
+    #overview-body, #gatt-body, #imu-body, #orient-body, #games-body { padding: 1 2; }
     RichLog { background: $panel; }
     """
 
@@ -67,7 +68,11 @@ class TrikiApp(App):
         ("2", "show_tab('gatt')", "GATT"),
         ("3", "show_tab('imu')", "IMU"),
         ("4", "show_tab('orient')", "Orient"),
-        ("5", "show_tab('log')", "Log"),
+        ("5", "show_tab('games')", "Games"),
+        ("6", "show_tab('log')", "Log"),
+        ("left_square_bracket", "game_prev", "◀ Game"),
+        ("right_square_bracket", "game_next", "Game ▶"),
+        ("g", "game_restart", "Restart game"),
     ]
 
     def __init__(self, config: AppConfig) -> None:
@@ -78,6 +83,8 @@ class TrikiApp(App):
         self.mapper = create_orientation_mapper(config.orientation_mode)
         self.recorder = Recorder(config.csv_path, config.log_path)
         self.gestures = GestureDetector()
+        self.games: List[Game] = build_games()
+        self._active_game_index = 0
 
         maxlen = max(120, int(config.history_seconds * 110))
         self._gyro_x: Deque[float] = deque(maxlen=maxlen)
@@ -116,6 +123,9 @@ class TrikiApp(App):
             with TabPane("Orientation", id="orient"):
                 with VerticalScroll():
                     yield Static(id="orient-body")
+            with TabPane("Games", id="games"):
+                with VerticalScroll():
+                    yield Static(id="games-body")
             with TabPane("Log", id="log"):
                 yield RichLog(id="event-log", wrap=False, markup=False, highlight=False)
         yield Footer()
@@ -155,6 +165,9 @@ class TrikiApp(App):
         self._button_press_count = 0
         self._led_on = False
         self.gestures.reset()
+        game = self._current_game()
+        if game is not None:
+            game.reset()
         self.state.last_sample = None
         self.state.orientation = None
 
@@ -172,6 +185,35 @@ class TrikiApp(App):
 
     def action_show_tab(self, tab: str) -> None:
         self.query_one(TabbedContent).active = tab
+
+    # -- games -----------------------------------------------------------------
+
+    def _current_game(self) -> Optional[Game]:
+        if not self.games:
+            return None
+        return self.games[self._active_game_index % len(self.games)]
+
+    def _switch_game(self, delta: int) -> None:
+        if not self.games:
+            return
+        self._active_game_index = (self._active_game_index + delta) % len(self.games)
+        game = self._current_game()
+        if game is not None:
+            game.reset()
+            self._log(f"Game: {game.name}")
+        self.query_one(TabbedContent).active = "games"
+
+    def action_game_prev(self) -> None:
+        self._switch_game(-1)
+
+    def action_game_next(self) -> None:
+        self._switch_game(1)
+
+    def action_game_restart(self) -> None:
+        game = self._current_game()
+        if game is not None:
+            game.reset()
+            self._log(f"Game restarted: {game.name}")
 
     def action_toggle_led(self) -> None:
         if self._ble is None or self.state.conn_state != "connected":
@@ -250,6 +292,7 @@ class TrikiApp(App):
         self._notif_sizes[len(data)] += 1
         self._notif_bytes += len(data)
         samples = self.processor.process(data, timestamp)
+        game = self._current_game()
         for sample in samples:
             orientation = self.mapper.update(sample)
             self.state.last_sample = sample
@@ -257,16 +300,23 @@ class TrikiApp(App):
             self.state.calibrating = getattr(self.mapper, "calibrating", False)
             self._peak_gyro = max(self._peak_gyro, sample.gyro_magnitude)
             self._peak_accel = max(self._peak_accel, sample.accel_magnitude)
+            if game is not None:
+                game.on_sample(sample, orientation)
             if sample.button_pressed != self._button_pressed:
                 self._button_pressed = sample.button_pressed
                 if sample.button_pressed:
                     self._button_press_count += 1
                 self._log(f"Button {'PRESSED' if sample.button_pressed else 'released'}")
+                if game is not None:
+                    game.on_button(sample.button_pressed)
                 if self.recorder.is_recording:
                     self.recorder.log_event(f"button {'pressed' if sample.button_pressed else 'released'}")
             event = self.gestures.update(sample)
-            if event is not None and self.recorder.is_recording:
-                self.recorder.log_event(f"gesture: {event.name} (mag={event.magnitude:.2f})")
+            if event is not None:
+                if game is not None:
+                    game.on_gesture(event.name)
+                if self.recorder.is_recording:
+                    self.recorder.log_event(f"gesture: {event.name} (mag={event.magnitude:.2f})")
             self._gyro_x.append(sample.gyro_x)
             self._gyro_y.append(sample.gyro_y)
             self._gyro_z.append(sample.gyro_z)
@@ -302,6 +352,8 @@ class TrikiApp(App):
                 self.query_one("#imu-body", Static).update(self._render_imu())
             elif active == "orient":
                 self.query_one("#orient-body", Static).update(self._render_orientation())
+            elif active == "games":
+                self.query_one("#games-body", Static).update(self._render_games())
         except NoMatches:
             return
 
@@ -558,4 +610,30 @@ class TrikiApp(App):
             Panel(cube_text, title="Orientation (wireframe)", border_style="cyan"),
             Panel(info, title="Angles", border_style="magenta"),
             Text("r = zero at current pose   z = recalibrate   m = switch filter", style="dim"),
+        )
+
+    def _render_games(self) -> Group:
+        game = self._current_game()
+        if game is None:
+            return Group(Text("No games available.", style="dim"))
+
+        selector = Text()
+        for i, gm in enumerate(self.games):
+            if i == self._active_game_index:
+                selector.append(f" {gm.name} ", style="bold black on cyan")
+            else:
+                selector.append(f" {gm.name} ", style="dim")
+            selector.append("  ")
+
+        if self.state.conn_state != "connected" or self.state.last_sample is None:
+            body = Text("Connect (press c) and hold the cap still to calibrate, then play.", style="yellow")
+        elif self.state.calibrating:
+            body = Text("Calibrating... hold the cap still for a moment.", style="yellow")
+        else:
+            body = game.render(60, 22)
+
+        return Group(
+            Panel(selector, title="Games", border_style="cyan"),
+            Panel(body, title=game.name, border_style="green"),
+            Text(f"[ ] switch game    g restart    {game.help}", style="dim"),
         )

@@ -34,6 +34,11 @@ Bogaty dashboard w terminalu (Textual/Rich) z zakładkami:
 - **Orientation** — orientacja 3D liczona filtrem **Madgwick AHRS** (lub
   komplementarnym), wizualizowana obracającym się szkieletem sześcianu w ASCII,
   kąty pitch/roll/yaw i kwaternion. Auto-kalibracja przy starcie strumienia.
+- **Games** — kilka prostych gier ASCII sterowanych kapslem (na żywo, na tym
+  samym strumieniu IMU): **Tilt Maze** (przechylaniem prowadzisz kulkę do celu),
+  **Spin Meter** (jak najszybciej zakręć kapslem — pomiar szczytowej prędkości
+  obrotowej) i **Reflex Catch** (test refleksu: zareaguj tapnięciem/przyciskiem
+  na sygnał). Klawiszami `[` / `]` przełączasz grę, `g` restartuje bieżącą.
 - **Log** — przewijalny dziennik zdarzeń (połączenie, przycisk, gesty, LED…).
 
 Dane można zapisywać do **CSV** (strumień IMU + kąty + stan przycisku) i
@@ -96,7 +101,9 @@ Jeśli kapsel śpi — naciśnij na nim przycisk tuż przed łączeniem, aby go 
 | `m` | Przełącz filtr orientacji (Madgwick / komplementarny) |
 | `s` | Włącz/wyłącz nagrywanie do CSV |
 | `l` | Zapal/zgaś diodę LED na kapslu |
-| `1`–`5` | Przełącz zakładkę (Overview / GATT / IMU / Orientation / Log) |
+| `1`–`6` | Przełącz zakładkę (Overview / GATT / IMU / Orientation / Games / Log) |
+| `[` / `]` | (Games) Poprzednia / następna gra |
+| `g` | (Games) Restart bieżącej gry |
 | `q` | Wyjście |
 
 ### Tryb skanowania (bez TUI)

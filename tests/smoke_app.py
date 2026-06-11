@@ -67,11 +67,23 @@ async def main():
             data = make_frame(100 + i, -50, 25, 0, 0, 2048)
             app._on_notification(data, now)
 
-        # Cycle through every tab using the keyboard shortcuts (1-5).
-        for key in ("1", "2", "3", "4", "5"):
+        # Cycle through every tab using the keyboard shortcuts (1-6).
+        for key in ("1", "2", "3", "4", "5", "6"):
             await pilot.press(key)
             app._tick()
             await pilot.pause()
+
+        # Exercise the Games tab: switch games and render each one.
+        await pilot.press("5")  # Games tab
+        for _ in range(len(app.games)):
+            app._tick()
+            await pilot.press("right_square_bracket")  # next game
+            await pilot.pause()
+        await pilot.press("g")  # restart current game
+        app._tick()
+        assert app._current_game() is not None
+        await pilot.press("6")  # back to the Log tab
+        await pilot.pause()
 
         # Trigger a gesture (hard accel spike ~3.5 g) with a fresh timestamp,
         # then render immediately so it is still within the hold window.
