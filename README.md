@@ -12,6 +12,8 @@ Bluetooth Low Energy.
 TrikiScope łączy się z kapslem przez BLE, czyta z niego wszystko, co się da, dekoduje
 strumień IMU i wizualizuje orientację 3D w czasie rzeczywistym.
 
+![Demo działania](images/demo.gif)
+
 ## Co pokazuje
 
 Bogaty dashboard w terminalu (Textual/Rich) z zakładkami:
