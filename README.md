@@ -223,6 +223,15 @@ osobno, gdy aplikacja TUI jest zamknięta):
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+## Projekt siostrzany — TrikiEmu
+
+**[TrikiEmu](https://github.com/Maku-hub/TrikiEmu)** to odwrotność TrikiScope: zamiast *czytać* kapsel, **udaje go**. ESP32 w roli
+BLE *peripheral* odtwarza tożsamość i profil Triki (reklama, NUS, strumień IMU), dzięki czemu
+aplikacja Żappka łączy się z nim jak z prawdziwym kapslem, a ruch podaje się z komputera.
+TrikiScope jest BLE *centralem* (klient), TrikiEmu — *peripheralem* (serwer); cała wiedza
+o protokole pochodzi z reverse-engineeringu zrobionego tutaj. TrikiScope pełni też rolę
+**znanego-dobrego centrala do walidacji** emulatora, zanim ten trafi do appki Żabki.
+
 ## Zastrzeżenie
 
 Projekt służy celom edukacyjnym i dokumentacyjnym. Nie jest powiązany z firmą Żabka.
