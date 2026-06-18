@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Maku-hub/TrikiScope/actions/workflows/tests.yml/badge.svg)](https://github.com/Maku-hub/TrikiScope/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Release](https://img.shields.io/github/v/release/Maku-hub/TrikiScope)](https://github.com/Maku-hub/TrikiScope/releases)
 
 Otwarty, terminalowy (TUI) odczytywacz i inspektor BLE dla urządzenia **Żabka Triki**,
