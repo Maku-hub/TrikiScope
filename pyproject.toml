@@ -4,12 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trikiscope"
-version = "0.1.0"
+version = "1.0.0"
 description = "Terminalowy inspektor BLE oraz podgląd IMU/orientacji dla urządzenia Żabka Triki (Python)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "TrikiScope" }]
+authors = [{ name = "Mateusz \"Maku\" Mączewski" }]
+keywords = [
+    "ble",
+    "bluetooth-low-energy",
+    "bleak",
+    "imu",
+    "accelerometer",
+    "gyroscope",
+    "textual",
+    "rich",
+    "tui",
+    "reverse-engineering",
+    "madgwick",
+    "ahrs",
+    "nrf52",
+    "lsm6dsl",
+    "triki",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+    "Topic :: Terminals",
+]
 dependencies = [
     "bleak>=0.22.0",
     "textual>=0.79.0",
@@ -18,6 +48,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/Maku-hub/TrikiScope"
+Repository = "https://github.com/Maku-hub/TrikiScope"
+Issues = "https://github.com/Maku-hub/TrikiScope/issues"
 
 [project.scripts]
 trikiscope = "trikiscope.__main__:main"

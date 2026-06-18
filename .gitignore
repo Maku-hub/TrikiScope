@@ -4,6 +4,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Build artifacts (python -m build)
+dist/
+build/
+
 # Virtual environment
 .venv/
 venv/
