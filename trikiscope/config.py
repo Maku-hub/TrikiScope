@@ -17,6 +17,8 @@ LED_CHAR_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
 # measurements): 20 | accel FS u16 LE (16 g) | gyro FS u16 LE (2000 dps) |
 # ODR u16 LE (0x68 = 104 Hz; the Zappka app sends 0x34 = 52 Hz) | 03.
 DEFAULT_START_COMMAND = bytes.fromhex("201000D007680003")
+# What the Zappka app writes to RX to stop the stream (seen in its BLE traffic).
+STOP_COMMAND = bytes.fromhex("20000000000000")
 
 # LSM6DSL sensitivities for the full scales the start command selects.
 GYRO_LSB_PER_DPS = 1000.0 / 70.0  # +-2000 dps: 70 mdps/LSB -> 14.29 LSB/(deg/s)

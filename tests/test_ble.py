@@ -7,7 +7,15 @@ import pytest
 
 from trikiscope import ble as ble_mod
 from trikiscope.ble import BleCallbacks, TrikiBleClient
-from trikiscope.config import LED_CHAR_UUID, AppConfig
+from trikiscope.config import (
+    DEFAULT_START_COMMAND,
+    LED_CHAR_UUID,
+    NUS_RX_CHAR_UUID,
+    NUS_SERVICE_UUID,
+    NUS_TX_CHAR_UUID,
+    STOP_COMMAND,
+    AppConfig,
+)
 
 
 class Recorder:
@@ -61,19 +69,28 @@ def _char(uuid, props):
 
 
 class FakeClient:
-    """Connects; exposes only the LED characteristic (value 01)."""
+    """Connects; exposes NUS RX/TX and the LED characteristic (value 01)."""
 
     hang_on_connect = False
+    last = None
 
     def __init__(self, device, disconnected_callback=None):
         self.is_connected = False
         self.address = device.address
         self.mtu_size = 247
         self.services = [
-            SimpleNamespace(uuid="6e400001-b5a3-f393-e0a9-e50e24dcca9e", handle=1,
-                            characteristics=[_char(LED_CHAR_UUID, ["read", "write"])])
+            SimpleNamespace(uuid=NUS_SERVICE_UUID, handle=1, characteristics=[
+                _char(NUS_RX_CHAR_UUID, ["write-without-response"]),
+                _char(NUS_TX_CHAR_UUID, ["notify"]),
+                _char(LED_CHAR_UUID, ["read", "write"]),
+            ])
         ]
         self.writes = []
+        self.events = []
+        FakeClient.last = self
+
+    async def start_notify(self, char, handler):
+        pass
 
     async def connect(self):
         if self.hang_on_connect:
@@ -81,13 +98,16 @@ class FakeClient:
         self.is_connected = True
 
     async def disconnect(self):
+        self.events.append("disconnect")
         self.is_connected = False
 
     async def read_gatt_char(self, char):
         return bytearray(b"\x01")
 
     async def write_gatt_char(self, char, data, response=False):
-        self.writes.append((char, bytes(data)))
+        uuid = char if isinstance(char, str) else char.uuid
+        self.writes.append((uuid, bytes(data)))
+        self.events.append(("write", uuid, bytes(data)))
 
 
 async def _run_then_stop(client: TrikiBleClient, after: float = 0.05, limit: float = 2.0):
@@ -141,6 +161,38 @@ def test_led_state_is_read_on_connect_and_confirmed_on_write(monkeypatch):
         await asyncio.wait_for(task, timeout=2.0)
 
     asyncio.run(scenario())
+
+
+def _connect_and_stop(monkeypatch, config: AppConfig) -> FakeClient:
+    monkeypatch.setattr(ble_mod, "BleakScanner", FindingScanner)
+    monkeypatch.setattr(ble_mod, "BleakClient", FakeClient)
+    rec = Recorder()
+    client = TrikiBleClient(config, rec.callbacks())
+
+    async def scenario():
+        task = asyncio.ensure_future(client.run())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if any("Streaming" in m for m in rec.logs):
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(scenario())
+    return FakeClient.last
+
+
+def test_stop_command_sent_before_disconnect(monkeypatch):
+    fake = _connect_and_stop(monkeypatch, AppConfig())
+    rx = NUS_RX_CHAR_UUID
+    assert fake.events[-2:] == [("write", rx, STOP_COMMAND), "disconnect"]
+    assert ("write", rx, DEFAULT_START_COMMAND) in fake.events
+
+
+def test_no_stop_command_when_stream_was_never_started(monkeypatch):
+    fake = _connect_and_stop(monkeypatch, AppConfig(auto_start_stream=False))
+    assert all(e == "disconnect" or e[2] != STOP_COMMAND for e in fake.events)
+    assert fake.events[-1] == "disconnect"
 
 
 def test_failed_led_write_does_not_report_a_state(monkeypatch):

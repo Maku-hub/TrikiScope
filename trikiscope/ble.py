@@ -34,6 +34,7 @@ from .config import (
     NUS_RX_CHAR_UUID,
     NUS_SERVICE_UUID,
     NUS_TX_CHAR_UUID,
+    STOP_COMMAND,
 )
 
 
@@ -133,12 +134,14 @@ class TrikiBleClient:
         self._client: Optional[BleakClient] = None
         self._stop_event = asyncio.Event()
         self._char_values: dict[str, bytes] = {}
+        self._stream_started = False
 
     # -- public API ------------------------------------------------------------
 
     async def run(self) -> None:
         """Find, connect and stream until :meth:`stop` (or disconnect)."""
         self._stop_event.clear()
+        self._stream_started = False
         try:
             device, adv = await self._scan()
             if device is None:
@@ -382,6 +385,7 @@ class TrikiBleClient:
                 self._cb.on_log("NUS RX characteristic not found - cannot send start command.")
                 return
             await self._client.write_gatt_char(rx, self._config.start_command, response=False)
+            self._stream_started = True
             self._cb.on_log(f"Wrote start command: {g.hexdump(self._config.start_command)}")
 
     def _emit_led_state(self) -> None:
@@ -399,10 +403,25 @@ class TrikiBleClient:
                     return char
         return None
 
+    async def _send_stop(self) -> None:
+        """Ask the device to stop streaming (as the Zappka app does) before disconnecting."""
+        rx = self._find_char(NUS_RX_CHAR_UUID)
+        if rx is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._client.write_gatt_char(rx, STOP_COMMAND, response=False), timeout=1.0
+            )
+            self._cb.on_log(f"Wrote stop command: {g.hexdump(STOP_COMMAND)}")
+        except Exception as exc:  # noqa: BLE001 - best effort, we disconnect anyway
+            self._cb.on_log(f"Stop command failed: {exc!r}")
+
     async def _cleanup(self) -> None:
         if self._client is not None:
             try:
                 if self._client.is_connected:
+                    if self._stream_started:
+                        await self._send_stop()
                     await self._client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
