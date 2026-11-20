@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -14,9 +15,11 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Footer, Header, RichLog, Static, TabbedContent, TabPane
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, OptionList, RichLog, Static, TabbedContent, TabPane
+from textual.widgets.option_list import Option
 
 from . import gatt_names as g
 from . import render
@@ -38,6 +41,42 @@ from .protocol import (
     sample_rate_from_start_command,
 )
 from .recorder import Recorder
+from .replay import Recording, ReplayClient
+
+
+class DevicePicker(ModalScreen[Optional[str]]):
+    """Lets the user choose one of several Triki devices found by the scan."""
+
+    DEFAULT_CSS = """
+    DevicePicker { align: center middle; }
+    #picker { width: 72; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    #picker OptionList { height: auto; max-height: 12; }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, devices: List[AdvertisementInfo]) -> None:
+        super().__init__()
+        self._devices = devices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="picker"):
+            yield Static("Found several Triki devices - pick one (Enter), Esc = cancel.\n")
+            yield OptionList(
+                *[
+                    Option(
+                        f"{d.name or '(no name)'}   {d.address}   "
+                        + ("? dBm" if d.rssi is None else f"{d.rssi} dBm"),
+                        id=d.address,
+                    )
+                    for d in self._devices
+                ]
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 @dataclass
@@ -80,13 +119,14 @@ class TrikiApp(App):
         ("g", "game_restart", "Restart game"),
     ]
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, recording: Optional[Recording] = None) -> None:
         super().__init__()
         self.config = config
+        self.recording = recording
         self.state = AppState(orientation_mode=config.orientation_mode)
         self.processor: Optional[BleNotificationProcessor] = None
         self.mapper = create_orientation_mapper(config.orientation_mode)
-        self.recorder = Recorder(config.csv_path, config.log_path)
+        self.recorder = Recorder(config.csv_path, config.log_path, config.raw_path)
         self.gestures = GestureDetector()
         self.games: List[Game] = build_games()
         self._active_game_index = 0
@@ -101,7 +141,7 @@ class TrikiApp(App):
         self._notif_sizes: Counter = Counter()
         self._notif_bytes: int = 0
         self._pending_logs: Deque[str] = deque()
-        self._ble: Optional[TrikiBleClient] = None
+        self._ble: Optional[TrikiBleClient | ReplayClient] = None
         self._sample_rate = 0.0
         self._connect_mono: Optional[float] = None
         self._peak_gyro = 0.0
@@ -140,26 +180,20 @@ class TrikiApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "TrikiScope"
+        self.title = "TrikiScope" if self.recording is None else "TrikiScope (replay)"
         self.sub_title = "disconnected"
         self.set_interval(1 / 15, self._tick)
+        if self.config.record:
+            self.action_toggle_record()
         if self.config.auto_connect:
             self.action_connect()
 
     # -- BLE lifecycle ---------------------------------------------------------
 
     def action_connect(self) -> None:
-        if self.state.conn_state in ("scanning", "connecting", "connected"):
+        if self.state.conn_state in ("scanning", "connecting", "connected", "reconnecting"):
             self._log("Already connecting/connected.")
             return
-        self.processor = BleNotificationProcessor(
-            self.config.gyro_scale,
-            self.config.accel_scale,
-            self.config.startup_discard_samples,
-            sample_rate_hz=self._nominal_sample_rate(),
-        )
-        self.mapper = create_orientation_mapper(self.state.orientation_mode)
-        self.mapper.reset_for_new_stream()
         self._gyro_x.clear()
         self._gyro_y.clear()
         self._gyro_z.clear()
@@ -190,9 +224,40 @@ class TrikiApp(App):
             on_battery=self._on_battery,
             on_notification=self._on_notification,
             on_led=self._on_led,
+            choose_device=self._choose_device,
         )
-        self._ble = TrikiBleClient(self.config, callbacks)
+        if self.recording is not None:
+            self._ble = ReplayClient(self.recording, callbacks, loop=self.config.replay_loop)
+        else:
+            self._ble = TrikiBleClient(self.config, callbacks)
         self.run_worker(self._ble.run(), exclusive=True, name="ble")
+
+    def _start_new_stream(self) -> None:
+        """Fresh decoder + recalibration; the device restarts its stream on every connect."""
+        self.processor = BleNotificationProcessor(
+            self.config.gyro_scale,
+            self.config.accel_scale,
+            self.config.startup_discard_samples,
+            sample_rate_hz=self._nominal_sample_rate(),
+        )
+        self.mapper = create_orientation_mapper(self.state.orientation_mode)
+        self.mapper.reset_for_new_stream()
+
+    async def _choose_device(self, devices: List[AdvertisementInfo]) -> Optional[str]:
+        """Show the picker and wait for the choice (None = cancelled)."""
+        choice: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def done(address: Optional[str]) -> None:
+            if not choice.done():
+                choice.set_result(address)
+
+        picker = DevicePicker(devices)
+        self.push_screen(picker, callback=done)
+        try:
+            return await choice
+        finally:
+            if not choice.done() and self.screen is picker:
+                picker.dismiss(None)  # scan was stopped while the picker was open
 
     def _nominal_sample_rate(self) -> float:
         if self.config.sample_rate_hz:
@@ -264,11 +329,24 @@ class TrikiApp(App):
             self._log(f"Recording stopped: {self.recorder.csv_path}")
         else:
             try:
-                self.recorder.start()
+                self.recorder.start(self.recording_meta())
             except OSError as exc:
                 self._log(f"Cannot start recording: {exc}")
                 return
-            self._log(f"Recording to {self.recorder.csv_path}")
+            raw = f" + {self.recorder.raw_path}" if self.recorder.raw_path else ""
+            self._log(f"Recording to {self.recorder.csv_path}{raw}")
+
+    def recording_meta(self) -> dict:
+        """Context stored in the raw recording header (used again by --replay)."""
+        meta: dict = {"start_command": self.config.start_command.hex()}
+        adv = self.state.advertisement
+        if adv is not None and self.recording is None:
+            meta["device_name"] = adv.name
+            meta["device_address"] = adv.address
+        info = self.state.device_info
+        if info is not None and info.firmware_revision:
+            meta["firmware_revision"] = info.firmware_revision
+        return meta
 
     def on_unmount(self) -> None:
         if self.recorder.is_recording:
@@ -286,6 +364,7 @@ class TrikiApp(App):
         self.state.conn_state = state
         if state == "connected":
             self._connect_mono = time.monotonic()
+            self._start_new_stream()
         elif state in ("disconnected", "error"):
             self._connect_mono = None
             self._led_on = False  # unknown until the next connect reads it back
@@ -311,10 +390,14 @@ class TrikiApp(App):
 
     def _on_led(self, on: bool) -> None:
         self._led_on = on
+        if self.recorder.is_recording:
+            self.recorder.log_event(f"led {'on' if on else 'off'}")
 
     def _on_notification(self, data: bytes, timestamp: datetime) -> None:
         if self.processor is None:
             return
+        if self.recorder.is_recording:
+            self.recorder.write_raw(data, timestamp)
         self._notif_times.append(timestamp.timestamp())
         self._notif_sizes[len(data)] += 1
         self._notif_bytes += len(data)
@@ -464,6 +547,7 @@ class TrikiApp(App):
             "connected": "green",
             "scanning": "yellow",
             "connecting": "yellow",
+            "reconnecting": "yellow",
             "disconnected": "red",
             "error": "red bold",
         }

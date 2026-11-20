@@ -32,7 +32,15 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trikiscope.ble import BleCallbacks, TrikiBleClient  # noqa: E402
-from trikiscope.config import AppConfig  # noqa: E402
+from trikiscope.config import (  # noqa: E402
+    DEFAULT_GYRO_DPS,
+    DEFAULT_RATE_HZ,
+    GYRO_MDPS_PER_LSB,
+    SAMPLE_RATES_HZ,
+    AppConfig,
+    build_start_command,
+    gyro_lsb_per_dps,
+)
 from trikiscope.protocol import BleNotificationProcessor, ImuSample  # noqa: E402
 
 # LSB per deg/s for each candidate configuration.
@@ -134,10 +142,22 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--turns", type=float, default=1.0, help="full turns per trial (default 1)")
     ap.add_argument("--trials", type=int, default=3, help="number of trials (default 3)")
+    ap.add_argument("--gyro-range", type=int, choices=sorted(GYRO_MDPS_PER_LSB), default=DEFAULT_GYRO_DPS,
+                    help=f"gyro full scale to request in the start command (default {DEFAULT_GYRO_DPS})")
+    ap.add_argument("--odr", type=int, choices=SAMPLE_RATES_HZ, default=DEFAULT_RATE_HZ,
+                    help=f"sample rate to request (default {DEFAULT_RATE_HZ})")
     args = ap.parse_args()
 
-    config = AppConfig(scan_timeout_seconds=30.0)
-    processor = BleNotificationProcessor(config.gyro_scale, config.accel_scale, config.startup_discard_samples)
+    config = AppConfig(
+        scan_timeout_seconds=30.0,
+        start_command=build_start_command(gyro_dps=args.gyro_range, rate_hz=args.odr),
+        gyro_scale=gyro_lsb_per_dps(args.gyro_range),
+    )
+    print(f"Requesting +-{args.gyro_range} deg/s at {args.odr} Hz; "
+          f"expecting {config.gyro_scale:.2f} LSB/(deg/s) if the cap honours it.")
+    processor = BleNotificationProcessor(
+        config.gyro_scale, config.accel_scale, config.startup_discard_samples, sample_rate_hz=args.odr
+    )
     results: List[TurnAnalyzer] = []
     current = TurnAnalyzer(turns=args.turns)
     state = {"current": current}

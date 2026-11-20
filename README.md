@@ -50,8 +50,11 @@ Bogaty dashboard w terminalu (Textual/Rich) z zakładkami:
   na sygnał). Klawiszami `[` / `]` przełączasz grę, `g` restartuje bieżącą.
 - **Log** — przewijalny dziennik zdarzeń (połączenie, przycisk, gesty, LED…).
 
-Dane można zapisywać do **CSV** (strumień IMU + kąty + stan przycisku) i
-**logu zdarzeń**. Diodą LED na kapslu można sterować klawiszem `l`.
+Dane można zapisywać do **CSV** (strumień IMU + kąty + stan przycisku), pliku
+**surowych powiadomień BLE** i **logu zdarzeń**, a nagranie **odtworzyć** później bez
+kapsla. Diodą LED na kapslu można sterować klawiszem `l`. Gdy w pobliżu jest kilka
+kapsli, aplikacja pyta, z którym się połączyć; po zerwaniu połączenia sama łączy się
+ponownie.
 
 ## Wymagania
 
@@ -108,7 +111,7 @@ Jeśli kapsel śpi — naciśnij na nim przycisk tuż przed łączeniem, aby go 
 | `r` | Wyzeruj orientację w bieżącej pozie |
 | `z` | Rekalibracja (przytrzymaj nieruchomo) |
 | `m` | Przełącz filtr orientacji (Madgwick / komplementarny) |
-| `s` | Włącz/wyłącz nagrywanie do CSV |
+| `s` | Włącz/wyłącz nagrywanie (CSV + surowe powiadomienia) |
 | `l` | Zapal/zgaś diodę LED na kapslu |
 | `1`–`6` | Przełącz zakładkę (Overview / GATT / IMU / Orientation / Games / Log) |
 | `[` / `]` | (Games) Poprzednia / następna gra |
@@ -126,22 +129,76 @@ Wypisuje wszystkie reklamujące się urządzenia BLE (przydatne do znalezienia n
 ### Wybrane opcje
 
 ```
+Połączenie
 --name TEXT           fragment nazwy urządzenia (domyślnie "Triki")
+--address ADDR        łącz tylko z tym adresem BLE (bez pytania o wybór urządzenia)
 --scan-timeout SEC    czas skanowania (domyślnie 30)
---gyro-scale FLOAT    LSB na deg/s (domyślnie 14.29 = ±2000 deg/s)
---accel-scale FLOAT   LSB na g (domyślnie 2048.0)
+--no-reconnect        nie łącz ponownie po zerwaniu połączenia
+--auto-connect        połącz się zaraz po starcie
+--scan                wypisz urządzenia BLE i zakończ (bez TUI)
+
+Strumień IMU
+--odr {26,52,104,208}           częstotliwość próbkowania (domyślnie 104)
+--accel-range {2,4,8,16}        zakres akcelerometru ±g (domyślnie 16)
+--gyro-range {125,...,2000}     zakres żyroskopu ±deg/s (domyślnie 2000)
+--start-command HEX   surowa komenda startowa zamiast trzech opcji powyżej
+--gyro-scale / --accel-scale    wymuś przelicznik (domyślnie wynika z zakresu)
 --settle-delay SEC    odczekaj N s przed wysłaniem komendy startowej (domyślnie 0)
 --discard N           liczba początkowych próbek do odrzucenia (domyślnie 20)
---start-command HEX   komenda startowa na NUS RX (domyślnie 201000D007680003)
 --no-start            nie wysyłaj komendy startowej automatycznie
---auto-connect        połącz się zaraz po starcie
 --mode {madgwick,complementary}   filtr orientacji (domyślnie madgwick)
+
+Nagrywanie i odtwarzanie
 --record              nagrywaj od razu
---csv PATH / --log PATH   ścieżki plików wyjściowych
---scan                wypisz urządzenia BLE i zakończ (bez TUI)
+--csv / --raw / --log PATH      ścieżki plików wyjściowych
+--replay PLIK         odtwórz nagranie (.jsonl albo .csv) zamiast łączyć się z kapslem
+--loop                odtwarzaj w pętli
 ```
 
 Pełną listę zobaczysz przez `.\run.ps1 --help`.
+
+### Kilka kapsli i ponowne łączenie
+
+Po znalezieniu pierwszego kapsla skaner nasłuchuje jeszcze ok. 1,5 s. Jeśli pasuje
+więcej urządzeń, pojawia się okno wyboru (posortowane wg siły sygnału; `Enter` wybiera,
+`Esc` anuluje). Opcja `--address` pomija skanowanie po nazwie i okno wyboru.
+
+Gdy nawiązane połączenie zostanie zerwane (kapsel poza zasięgiem, uśpiony,
+rozładowany), TrikiScope próbuje połączyć się z **tym samym** kapslem co 1, 2, 5,
+a potem co 10 s, aż do skutku albo do naciśnięcia `d`. Po ponownym połączeniu
+strumień jest uruchamiany i kalibrowany od nowa. `--no-reconnect` wyłącza to zachowanie.
+
+### Nagrywanie i odtwarzanie
+
+Klawisz `s` (lub `--record`) zapisuje równolegle trzy pliki:
+
+- `triki_data.csv` — zdekodowane próbki, kąty i stan przycisku (do analizy),
+- `triki_raw.jsonl` — każde powiadomienie BLE dokładnie tak, jak przyszło
+  (bajty + czas przyjścia), z nagłówkiem zawierającym komendę startową i dane kapsla,
+- `triki_events.log` — dziennik zdarzeń.
+
+Istniejące pliki nie są nadpisywane — kolejne nagrania dostają znacznik czasu w nazwie.
+
+Nagranie można odtworzyć bez kapsla — cała aplikacja (parser, orientacja, gesty, gry,
+statystyki) działa wtedy na zapisanych danych, w oryginalnym tempie:
+
+```powershell
+.\run.ps1 --replay triki_raw.jsonl
+.\run.ps1 --replay triki_raw.jsonl --loop
+.\run.ps1 --replay triki_data.csv      # starsze nagrania CSV też działają
+```
+
+Plik `.jsonl` odtwarza dokładnie strumień bajtów (łącznie z podziałem na powiadomienia),
+a przeliczniki są brane z zapisanej komendy startowej. Plik `.csv` jest odtwarzany jako
+ramki zrekonstruowane z surowych wartości.
+
+### Częstotliwość i zakresy czujnika
+
+Komenda startowa jest budowana z opcji `--odr`, `--accel-range` i `--gyro-range`, a
+przeliczniki dobierane do wybranych zakresów. Na kapslu sprawdzone są: **±16 g,
+±2000 deg/s, 52 i 104 Hz**. Przy innych ustawieniach aplikacja ostrzega — skalę
+żyroskopu sprawdzisz narzędziem `tools/probe_gyro_scale.py` z tymi samymi opcjami
+(np. `--gyro-range 500`).
 
 ## Specyfikacja BLE
 
@@ -251,6 +308,8 @@ osobno, gdy aplikacja TUI jest zamknięta):
 - `probe_led.py` — potwierdza sterowanie diodą (wzorzec mrugania).
 - `probe_write_vendor.py` — bezpieczny (read-modify-restore) test zapisu do `6e400004`.
 - `probe_ble_layer.py` — test produkcyjnej warstwy BLE end-to-end.
+- `probe_gyro_scale.py` — pomiar skali żyroskopu obrotem o 360° (opcje `--gyro-range`,
+  `--odr`, `--turns`, `--trials`).
 
 ```powershell
 .\.venv\Scripts\python.exe tools\diagnose.py

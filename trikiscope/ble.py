@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
@@ -102,6 +102,8 @@ class BleCallbacks:
     on_notification: Callable[[bytes, datetime], None]
     on_led: Callable[[bool], None] = lambda _on: None
     """LED state as read from the device on connect, and after each successful write."""
+    choose_device: Optional[Callable[[List[AdvertisementInfo]], Awaitable[Optional[str]]]] = None
+    """Asked to pick one address when several devices match; None = strongest signal wins."""
 
 
 # Standard SIG UUIDs we read during device-info collection.
@@ -128,47 +130,92 @@ class _StopRequested(Exception):
 
 
 class TrikiBleClient:
+    RECONNECT_DELAYS = (1.0, 2.0, 5.0, 10.0)
+    """Back-off between reconnect attempts (the last value repeats)."""
+
     def __init__(self, config: AppConfig, callbacks: BleCallbacks) -> None:
         self._config = config
         self._cb = callbacks
         self._client: Optional[BleakClient] = None
-        self._stop_event = asyncio.Event()
+        self._stop_event = asyncio.Event()  # user asked to stop
+        self._session_end = asyncio.Event()  # the current connection dropped
         self._char_values: dict[str, bytes] = {}
         self._stream_started = False
+        self._session_connected = False
+        self._last_address: Optional[str] = None
 
     # -- public API ------------------------------------------------------------
 
     async def run(self) -> None:
-        """Find, connect and stream until :meth:`stop` (or disconnect)."""
-        self._stop_event.clear()
-        self._stream_started = False
-        try:
-            device, adv = await self._scan()
-            if device is None:
-                self._cb.on_log(
-                    "No matching device found. Press the button on Triki to wake it, then retry."
-                )
-                return  # _cleanup() reports "disconnected"
-            if adv is not None:
-                self._emit_advertisement(device, adv)
+        """Find, connect and stream until :meth:`stop`.
 
-            self._cb.on_state("connecting")
-            self._cb.on_log(f"Connecting to {device.name or '?'} ({device.address})...")
-            await self._connect(device)
+        If an established connection drops and ``auto_reconnect`` is on, keeps
+        trying to get the same device back (with back-off) until stopped.
+        """
+        self._stop_event.clear()
+        target = self._config.device_address
+        connected_once = False
+        attempt = 0
+        try:
+            while True:
+                outcome = await self._session(target)
+                if self._session_connected:
+                    connected_once = True
+                    target = self._last_address
+                    attempt = 0
+                if not (self._config.auto_reconnect and connected_once):
+                    if outcome == "not_found":
+                        self._cb.on_log(
+                            "No matching device found. Press the button on Triki to wake it, then retry."
+                        )
+                    elif outcome == "error":
+                        self._cb.on_state("error")
+                    return
+                delay = self.RECONNECT_DELAYS[min(attempt, len(self.RECONNECT_DELAYS) - 1)]
+                attempt += 1
+                self._cb.on_state("reconnecting")
+                self._cb.on_log(
+                    f"Reconnecting to {target} in {delay:.0f}s (attempt {attempt}); press 'd' to give up."
+                )
+                await self._unless_stopped(asyncio.sleep(delay))
         except _StopRequested:
             self._cb.on_log("Stopped.")
         except asyncio.CancelledError:
             self._cb.on_log("Cancelled.")
             raise
-        except Exception as exc:  # noqa: BLE001 - surface any backend error to the UI
-            self._cb.on_log(f"Error: {exc!r}")
-            self._cb.on_state("error")
         finally:
-            await self._cleanup()
+            self._cb.on_state("disconnected")
 
     def stop(self) -> None:
-        """Request shutdown; also interrupts an ongoing scan / connect / setup."""
+        """Request shutdown; also interrupts an ongoing scan / connect / setup / back-off."""
         self._stop_event.set()
+
+    async def _session(self, address: Optional[str]) -> str:
+        """One scan + connect + stream cycle: "lost", "not_found" or "error".
+
+        Raises _StopRequested when stop() interrupts it.
+        """
+        self._stream_started = False
+        self._session_connected = False
+        self._session_end = asyncio.Event()
+        try:
+            found = await self._scan(address)
+            if found is None:
+                return "not_found"
+            device, adv = found
+            self._emit_advertisement(device, adv)
+            self._last_address = device.address
+            self._cb.on_state("connecting")
+            self._cb.on_log(f"Connecting to {device.name or '?'} ({device.address})...")
+            await self._connect(device)
+            return "lost"
+        except (_StopRequested, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface any backend error to the UI
+            self._cb.on_log(f"Error: {exc!r}")
+            return "error"
+        finally:
+            await self._disconnect_client()
 
     async def set_led(self, on: bool) -> bool:
         """Turn the device LED on/off via the vendor characteristic (bit 0).
@@ -209,54 +256,87 @@ class TrikiBleClient:
 
     # -- scanning --------------------------------------------------------------
 
-    async def _scan(self) -> tuple[Optional[BLEDevice], Optional[AdvertisementData]]:
+    async def _scan(
+        self, address: Optional[str]
+    ) -> Optional[tuple[BLEDevice, AdvertisementData]]:
+        """Find the device: by ``address`` if given, else by name (with a picker)."""
         self._cb.on_state("scanning")
-        self._cb.on_log(
-            f"Scanning up to {self._config.scan_timeout_seconds:.0f}s for a name containing "
-            f"'{self._config.device_name}'..."
-        )
-        found: asyncio.Future = asyncio.get_running_loop().create_future()
+        timeout = self._config.scan_timeout_seconds
+        if address:
+            self._cb.on_log(f"Scanning up to {timeout:.0f}s for {address}...")
+        else:
+            self._cb.on_log(
+                f"Scanning up to {timeout:.0f}s for a name containing '{self._config.device_name}'..."
+            )
+        candidates: dict[str, tuple[BLEDevice, AdvertisementData]] = {}
+        first_match = asyncio.Event()
         name_needle = self._config.device_name.lower()
 
         def detection(device: BLEDevice, adv: AdvertisementData) -> None:
-            name = adv.local_name or device.name
-            if name and name_needle in name.lower() and not found.done():
-                found.set_result((device, adv))
+            if address:
+                match = device.address.upper() == address.upper()
+            else:
+                name = adv.local_name or device.name
+                match = bool(name) and name_needle in name.lower()
+            if match:
+                candidates[device.address] = (device, adv)  # keep the freshest RSSI
+                first_match.set()
 
         scanner = BleakScanner(detection_callback=detection)
         await scanner.start()
         try:
-            result = await self._unless_stopped(
-                asyncio.wait_for(found, timeout=self._config.scan_timeout_seconds)
-            )
-        except asyncio.TimeoutError:
-            self._cb.on_log("Scan timed out.")
-            result = (None, None)
+            try:
+                await self._unless_stopped(asyncio.wait_for(first_match.wait(), timeout=timeout))
+            except asyncio.TimeoutError:
+                self._cb.on_log("Scan timed out.")
+                return None
+            if not address and self._config.pick_window_seconds > 0:
+                # Give other Triki devices nearby a moment to show up.
+                await self._unless_stopped(asyncio.sleep(self._config.pick_window_seconds))
         finally:
             await scanner.stop()
-        return result
+
+        if len(candidates) == 1:
+            return next(iter(candidates.values()))
+        return await self._pick(candidates)
+
+    async def _pick(
+        self, candidates: dict[str, tuple[BLEDevice, AdvertisementData]]
+    ) -> Optional[tuple[BLEDevice, AdvertisementData]]:
+        infos = sorted(
+            (_advertisement_info(dev, adv) for dev, adv in candidates.values()),
+            key=lambda i: i.rssi if i.rssi is not None else -999,
+            reverse=True,
+        )
+        self._cb.on_log(
+            f"Found {len(infos)} matching devices: "
+            + ", ".join(f"{i.name} ({i.address}, {i.rssi} dBm)" for i in infos)
+        )
+        if self._cb.choose_device is None:
+            chosen: Optional[str] = infos[0].address
+            self._cb.on_log(f"Picking the strongest signal: {chosen}. Use --address to choose.")
+        else:
+            chosen = await self._unless_stopped(self._cb.choose_device(infos))
+            if chosen is None:
+                self._cb.on_log("No device selected.")
+                return None
+        return candidates.get(chosen)
 
     def _emit_advertisement(self, device: BLEDevice, adv: AdvertisementData) -> None:
-        info = AdvertisementInfo(
-            name=adv.local_name or device.name,
-            address=device.address,
-            rssi=getattr(adv, "rssi", None),
-            tx_power=getattr(adv, "tx_power", None),
-            service_uuids=list(adv.service_uuids or []),
-            manufacturer_data={k: bytes(v) for k, v in (adv.manufacturer_data or {}).items()},
-            service_data={k: bytes(v) for k, v in (adv.service_data or {}).items()},
-        )
-        self._cb.on_advertisement(info)
+        self._cb.on_advertisement(_advertisement_info(device, adv))
 
     # -- connection ------------------------------------------------------------
 
     async def _connect(self, device: BLEDevice) -> None:
+        session_end = self._session_end
+
         def on_disconnect(_client: BleakClient) -> None:
             self._cb.on_log("Device disconnected.")
-            self._stop_event.set()
+            session_end.set()
 
         self._client = BleakClient(device, disconnected_callback=on_disconnect)
         await self._unless_stopped(self._client.connect())
+        self._session_connected = True
         self._cb.on_state("connected")
         self._cb.on_log("Connected.")
 
@@ -272,7 +352,7 @@ class TrikiBleClient:
         await self._subscribe_stream()
 
         self._cb.on_log("Streaming. Press 'd' to disconnect.")
-        await self._stop_event.wait()
+        await self._unless_stopped(session_end.wait())
 
     async def _enumerate_gatt(self, mtu: Optional[int]) -> None:
         assert self._client is not None
@@ -416,7 +496,7 @@ class TrikiBleClient:
         except Exception as exc:  # noqa: BLE001 - best effort, we disconnect anyway
             self._cb.on_log(f"Stop command failed: {exc!r}")
 
-    async def _cleanup(self) -> None:
+    async def _disconnect_client(self) -> None:
         if self._client is not None:
             try:
                 if self._client.is_connected:
@@ -426,21 +506,21 @@ class TrikiBleClient:
             except Exception:  # noqa: BLE001
                 pass
             self._client = None
-        self._cb.on_state("disconnected")
+
+
+def _advertisement_info(device: BLEDevice, adv: AdvertisementData) -> AdvertisementInfo:
+    return AdvertisementInfo(
+        name=adv.local_name or device.name,
+        address=device.address,
+        rssi=getattr(adv, "rssi", None),
+        tx_power=getattr(adv, "tx_power", None),
+        service_uuids=list(adv.service_uuids or []),
+        manufacturer_data={k: bytes(v) for k, v in (adv.manufacturer_data or {}).items()},
+        service_data={k: bytes(v) for k, v in (adv.service_data or {}).items()},
+    )
 
 
 async def quick_scan(timeout: float = 8.0) -> List[AdvertisementInfo]:
     """Standalone helper: list every advertising device (used by --scan)."""
-    results: dict[str, AdvertisementInfo] = {}
     devices = await BleakScanner.discover(timeout=timeout, return_adv=True)
-    for address, (device, adv) in devices.items():
-        results[address] = AdvertisementInfo(
-            name=adv.local_name or device.name,
-            address=address,
-            rssi=getattr(adv, "rssi", None),
-            tx_power=getattr(adv, "tx_power", None),
-            service_uuids=list(adv.service_uuids or []),
-            manufacturer_data={k: bytes(v) for k, v in (adv.manufacturer_data or {}).items()},
-            service_data={k: bytes(v) for k, v in (adv.service_data or {}).items()},
-        )
-    return list(results.values())
+    return [_advertisement_info(device, adv) for device, adv in devices.values()]

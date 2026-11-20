@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Deque, Iterator, List, Optional
 
+from .config import parse_start_command
+
 FRAME_LENGTH = 14
 FRAME_HEADER_BYTE0 = 0x22
 # The second header byte is a status flag: 0x00 = button released, 0x01 = pressed.
@@ -273,14 +275,13 @@ DEFAULT_SAMPLE_RATE_HZ = 104.0
 def sample_rate_from_start_command(command: bytes) -> Optional[float]:
     """Output data rate encoded in a start command, if it looks like one.
 
-    Observed commands are ``20 10 00 D0 07 <odr u16 LE> 03``: TrikiScope sends
-    ``68 00`` (104 Hz, matching the measured ~104 frames/s) and the Żappka app
-    ``34 00`` (52 Hz) - both LSM6DSL output data rates.
+    TrikiScope sends ``68 00`` (104 Hz, measured ~109 frames/s on a real cap) and
+    the Żappka app ``34 00`` (52 Hz) - both LSM6DSL output data rates.
     """
-    if len(command) != 8 or command[0] != 0x20:
+    settings = parse_start_command(command)
+    if settings is None or not 1 <= settings.rate_hz <= 6660:
         return None
-    rate = int.from_bytes(command[5:7], "little")
-    return float(rate) if 1 <= rate <= 6660 else None
+    return float(settings.rate_hz)
 
 
 class SampleClock:

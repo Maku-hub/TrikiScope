@@ -15,6 +15,7 @@ venv/
 # Recorded data
 triki_data.csv
 triki_events.log
+triki_raw*.jsonl
 *.csv
 
 # OS / editor
