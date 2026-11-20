@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from trikiscope.gestures import GestureDetector
+from trikiscope.gestures import SHAKE_MIN_SAMPLES, GestureDetector
 from trikiscope.protocol import ImuSample
 
 
@@ -34,10 +34,10 @@ def test_shake_detected():
     det = GestureDetector()
     t = datetime(2024, 1, 1, tzinfo=timezone.utc)
     names = []
-    for _ in range(6):
+    for _ in range(SHAKE_MIN_SAMPLES + 2):
         t += timedelta(milliseconds=10)
-        # Magnitude > 300 dps but no single axis over the SPIN threshold (250).
-        e = det.update(sample(200, 200, 150, 0.0, 0.0, 1.0, t))
+        # Magnitude > SHAKE (500 dps) but no single axis over the SPIN threshold (400).
+        e = det.update(sample(330, 330, 250, 0.0, 0.0, 1.0, t))
         if e:
             names.append(e.name)
     assert "SHAKE" in names
@@ -61,6 +61,22 @@ def test_active_label_hold_and_decay():
     base = e.timestamp
     assert det.active_label(base + 0.1) == "TAP / IMPACT"
     assert det.active_label(base + 5.0) is None  # decayed away
+
+
+def test_spin_detected_on_one_dominant_axis():
+    det = GestureDetector()
+    t = datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=10)
+    e = det.update(sample(0, 0, 450, 0.0, 0.0, 1.0, t))
+    assert e is not None and e.name == "SPIN"
+
+
+def test_ordinary_handling_is_not_a_gesture():
+    # A brisk but ordinary turn (~200 deg/s) must not fire SPIN/SHAKE.
+    det = GestureDetector()
+    t = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for _ in range(20):
+        t += timedelta(milliseconds=10)
+        assert det.update(sample(120, -80, 200, 0.0, 0.0, 1.0, t)) is None
 
 
 def test_quiet_motion_no_event():

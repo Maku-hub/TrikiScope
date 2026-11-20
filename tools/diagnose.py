@@ -24,7 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bleak import BleakClient, BleakScanner
 
 from trikiscope import gatt_names as g
-from trikiscope.config import NUS_RX_CHAR_UUID, NUS_TX_CHAR_UUID, DEFAULT_START_COMMAND
+from trikiscope.config import (
+    ACCEL_LSB_PER_G,
+    DEFAULT_START_COMMAND,
+    GYRO_LSB_PER_DPS,
+    NUS_RX_CHAR_UUID,
+    NUS_TX_CHAR_UUID,
+)
 
 NUS_TX = NUS_TX_CHAR_UUID.lower()
 
@@ -194,13 +200,13 @@ def _analyse_imu_stream(items, elapsed):
         print(f"    effective IMU sample rate: {frames / elapsed:.1f} Hz")
     # Decode a few frames spread across the capture.
     sample_idx = [0, frames // 2, frames - 1] if frames >= 3 else list(range(frames))
-    print("    decoded samples (gyro deg/s @131, accel g @2048):")
+    print(f"    decoded samples (gyro deg/s @{GYRO_LSB_PER_DPS:.2f}, accel g @{ACCEL_LSB_PER_G:.0f}):")
     for idx in sample_idx:
         if 0 <= idx < len(last_frame_starts):
             s = last_frame_starts[idx]
             gx, gy, gz, ax, ay, az = struct.unpack_from("<6h", raw, s + 2)
-            print(f"      frame {idx:4d}: gyro=({gx/131:+7.2f},{gy/131:+7.2f},{gz/131:+7.2f})  "
-                  f"accel=({ax/2048:+6.3f},{ay/2048:+6.3f},{az/2048:+6.3f})  raw={g.hexdump(bytes(raw[s:s+14]))}")
+            print(f"      frame {idx:4d}: gyro=({gx/GYRO_LSB_PER_DPS:+7.2f},{gy/GYRO_LSB_PER_DPS:+7.2f},{gz/GYRO_LSB_PER_DPS:+7.2f})  "
+                  f"accel=({ax/ACCEL_LSB_PER_G:+6.3f},{ay/ACCEL_LSB_PER_G:+6.3f},{az/ACCEL_LSB_PER_G:+6.3f})  raw={g.hexdump(bytes(raw[s:s+14]))}")
     # Per-notification framing (are frames aligned to notification boundaries?).
     misaligned = sum(1 for _, b in items if len(b) % 14 != 0 or (b[:2].hex() != "2200"))
     print(f"    notifications not starting on a 14B-aligned 22 00 frame: {misaligned}/{len(items)}")

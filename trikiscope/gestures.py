@@ -24,9 +24,11 @@ from .protocol import ImuSample
 FREE_FALL_ACCEL_G = 0.35
 FREE_FALL_MIN_SAMPLES = 2
 IMPACT_ACCEL_G = 2.5
-SHAKE_GYRO_DPS = 300.0
-SHAKE_MIN_SAMPLES = 4
-SPIN_AXIS_DPS = 250.0
+# Gyro thresholds are real deg/s (full scale +-2000).  Until the gyro scale fix
+# the old 300/250 values could only be reached at int16 saturation.
+SHAKE_GYRO_DPS = 500.0
+SHAKE_MIN_SAMPLES = 6
+SPIN_AXIS_DPS = 400.0
 
 REFRACTORY_SECONDS = 0.4
 HOLD_SECONDS = 0.8

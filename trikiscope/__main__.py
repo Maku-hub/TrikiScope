@@ -7,7 +7,7 @@ import asyncio
 import sys
 
 from . import gatt_names as g
-from .config import DEFAULT_START_COMMAND, AppConfig
+from .config import ACCEL_LSB_PER_G, DEFAULT_START_COMMAND, GYRO_LSB_PER_DPS, AppConfig
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -17,8 +17,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--name", default="Triki", help="Fragment reklamowanej nazwy urządzenia (domyślnie: Triki).")
     parser.add_argument("--scan-timeout", type=float, default=30.0, help="Czas skanowania w sekundach.")
-    parser.add_argument("--gyro-scale", type=float, default=131.0, help="Przelicznik żyroskopu (LSB na deg/s).")
-    parser.add_argument("--accel-scale", type=float, default=2048.0, help="Przelicznik akcelerometru (LSB na g).")
+    parser.add_argument(
+        "--gyro-scale",
+        type=float,
+        default=GYRO_LSB_PER_DPS,
+        help=f"Przelicznik żyroskopu (LSB na deg/s, domyślnie {GYRO_LSB_PER_DPS:.2f} = ±2000 deg/s).",
+    )
+    parser.add_argument(
+        "--accel-scale",
+        type=float,
+        default=ACCEL_LSB_PER_G,
+        help=f"Przelicznik akcelerometru (LSB na g, domyślnie {ACCEL_LSB_PER_G:.0f} = ±16 g).",
+    )
     parser.add_argument("--settle-delay", type=float, default=0.0, help="Ile sekund odczekać przed wysłaniem komendy startowej.")
     parser.add_argument("--discard", type=int, default=20, help="Liczba początkowych próbek do odrzucenia.")
     parser.add_argument(

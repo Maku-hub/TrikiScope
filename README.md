@@ -126,7 +126,7 @@ Wypisuje wszystkie reklamujące się urządzenia BLE (przydatne do znalezienia n
 ```
 --name TEXT           fragment nazwy urządzenia (domyślnie "Triki")
 --scan-timeout SEC    czas skanowania (domyślnie 30)
---gyro-scale FLOAT    LSB na deg/s (domyślnie 131.0)
+--gyro-scale FLOAT    LSB na deg/s (domyślnie 14.29 = ±2000 deg/s)
 --accel-scale FLOAT   LSB na g (domyślnie 2048.0)
 --settle-delay SEC    odczekaj N s przed wysłaniem komendy startowej (domyślnie 0)
 --discard N           liczba początkowych próbek do odrzucenia (domyślnie 20)
@@ -155,6 +155,19 @@ Aplikacja subskrybuje powiadomienia z TX i wysyła komendę inicjującą przesy�
 20 10 00 D0 07 68 00 03
 ```
 
+Z pomiarów wynika, że komenda konfiguruje czujnik LSM6DSL (pola `u16` little-endian):
+
+| Bajty | Wartość | Znaczenie |
+|---|---|---|
+| `20` | — | kod komendy START |
+| `10 00` | 16 | zakres akcelerometru ±16 g |
+| `D0 07` | 2000 | zakres żyroskopu ±2000 deg/s |
+| `68 00` | 104 | częstotliwość próbkowania 104 Hz (aplikacja Żappka wysyła `34 00` = 52 Hz) |
+| `03` | — | flagi (nieustalone) |
+
+Zakres żyroskopu potwierdziliśmy pomiarem (`tools/probe_gyro_scale.py`, obrót o 360°):
+zmierzono 14,26 LSB/(deg/s) wobec 14,29 z noty katalogowej dla ±2000 deg/s.
+
 Dodatkowo w usłudze NUS jest charakterystyka `6e400004-…` (read/write). Odkryliśmy
 przez eksperyment na żywo, że jej **bit 0 steruje diodą LED** na kapslu (`01` = świeci,
 `00` = zgaszona; wartość jest maskowana do 1 bitu). Klawisz `l` w aplikacji zapala/gasi LED.
@@ -168,8 +181,8 @@ Dane IMU przychodzą jako ramki **14-bajtowe** z nagłówkiem `22 00`:
 ```
 
 Każda oś to 16-bitowa liczba całkowita ze znakiem w formacie little-endian.
-Domyślne przeliczniki skalowania sprzętowego: `131.0` dla żyroskopu (LSB na deg/s)
-i `2048.0` dla akcelerometru (LSB na g).
+Domyślne przeliczniki skalowania sprzętowego: `14.29` (= 1000/70) dla żyroskopu
+(LSB na deg/s, zakres ±2000 deg/s) i `2048.0` dla akcelerometru (LSB na g, zakres ±16 g).
 
 **Drugi bajt nagłówka to flaga przycisku** (odkryte przez nasłuch BLE z naciskaniem
 przycisku): `22 00` = przycisk puszczony, `22 01` = przycisk wciśnięty. Payload jest
@@ -177,11 +190,16 @@ identyczny w obu przypadkach. TrikiScope parsuje oba nagłówki, więc nie gubi 
 podczas wciśnięcia, i pokazuje stan przycisku oraz licznik naciśnięć.
 
 Analiza przechwyconego ruchu BLE i aplikacji Żappka `4.37.0` wskazuje, że strumień
-przychodzi burstami BLE, zwykle po kilka ramek w krótkim pakiecie. TrikiScope używa
-timestampów powiadomień BLE jako źródła czasu próbek (eksperymentalny stały zegar ok.
-`104 Hz` dawał gorszą płynność w praktyce). Parser re-synchronizuje się po nagłówku
-(`22 00` lub `22 01`), więc odzyskuje strumień po sklejonych/uciętych powiadomieniach
-i nie gubi ramek z wciśniętym przyciskiem.
+przychodzi burstami BLE, zwykle po kilka ramek w krótkim pakiecie. Czas przyjścia
+powiadomienia nie mówi więc, kiedy próbka została zmierzona, dlatego TrikiScope nadaje
+próbkom równe odstępy według częstotliwości IMU: najpierw nominalnej z komendy startowej,
+potem zmierzonej na bieżąco (na prawdziwym kapslu ok. 109 Hz). Oś czasu jest powoli
+dociągana do zegara przyjścia i wyrównywana od nowa po przerwie w strumieniu.
+
+Nagłówek `22 00` może też wystąpić w danych (wartość surowa 34), więc po utracie
+synchronizacji parser przyjmuje granicę ramki dopiero po potwierdzeniu kolejnymi
+nagłówkami co 14 bajtów. Rozpoznaje oba nagłówki (`22 00` i `22 01`), więc nie gubi
+ramek z wciśniętym przyciskiem.
 
 Przy starcie strumienia urządzenie emituje krótki "szum" — pierwsze próbki (domyślnie 20)
 są odrzucane.

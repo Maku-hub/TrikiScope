@@ -13,8 +13,14 @@ NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # notify (device -> p
 # Vendor characteristic; bit 0 controls the LED (0 = off, 1 = on). Confirmed live.
 LED_CHAR_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
 
-# The command the Zappka app writes to RX to start the IMU stream.
+# The command written to RX to start the IMU stream.  Layout (inferred, matches
+# measurements): 20 | accel FS u16 LE (16 g) | gyro FS u16 LE (2000 dps) |
+# ODR u16 LE (0x68 = 104 Hz; the Zappka app sends 0x34 = 52 Hz) | 03.
 DEFAULT_START_COMMAND = bytes.fromhex("201000D007680003")
+
+# LSM6DSL sensitivities for the full scales the start command selects.
+GYRO_LSB_PER_DPS = 1000.0 / 70.0  # +-2000 dps: 70 mdps/LSB -> 14.29 LSB/(deg/s)
+ACCEL_LSB_PER_G = 2048.0  # +-16 g: 0.488 mg/LSB
 
 
 @dataclass(slots=True)
@@ -25,9 +31,9 @@ class AppConfig:
     """Substring matched (case-insensitive) against advertised local names."""
 
     scan_timeout_seconds: float = 30.0
-    gyro_scale: float = 131.0
-    """LSB per deg/s (LSM6DSL @ +-250 dps)."""
-    accel_scale: float = 2048.0
+    gyro_scale: float = GYRO_LSB_PER_DPS
+    """LSB per deg/s (LSM6DSL @ +-2000 dps; confirmed by tools/probe_gyro_scale.py)."""
+    accel_scale: float = ACCEL_LSB_PER_G
     """LSB per g (LSM6DSL @ +-16 g)."""
 
     start_command: bytes = DEFAULT_START_COMMAND
@@ -44,7 +50,7 @@ class AppConfig:
     # Orientation filter defaults (ported from the WPF VisualOrientationMapper).
     orientation_mode: str = "madgwick"  # or "complementary"
     madgwick_beta: float = 1.5
-    gyro_gain: float = 2.5
+    gyro_gain: float = 1.0
     smoothing_factor: float = 0.35
     visual_deadband_degrees: float = 8.0
 

@@ -214,7 +214,7 @@ class VisualOrientationMapper:
 
     def __init__(
         self,
-        gyro_gain: float = 2.5,
+        gyro_gain: float = 1.0,
         fallback_dt: float = 0.01,
         minimum_dt: float = 0.001,
         maximum_dt: float = 0.1,
