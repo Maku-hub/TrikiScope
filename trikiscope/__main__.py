@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import sys
 
+from . import __version__
 from . import gatt_names as g
 from .config import (
     ACCEL_LSB_PER_G,
@@ -30,6 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="trikiscope",
         description="Terminalowy inspektor BLE oraz podgląd IMU/orientacji dla urządzenia Żabka Triki.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     conn = parser.add_argument_group("połączenie")
     conn.add_argument("--name", default="Triki", help="Fragment reklamowanej nazwy urządzenia (domyślnie: Triki).")
     conn.add_argument(
