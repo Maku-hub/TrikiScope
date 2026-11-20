@@ -31,7 +31,12 @@ from .config import AppConfig
 from .games import Game, build_games
 from .gestures import GestureDetector
 from .orientation import Quaternion, VisualOrientation, create_orientation_mapper
-from .protocol import BleNotificationProcessor, ImuSample
+from .protocol import (
+    DEFAULT_SAMPLE_RATE_HZ,
+    BleNotificationProcessor,
+    ImuSample,
+    sample_rate_from_start_command,
+)
 from .recorder import Recorder
 
 
@@ -147,6 +152,7 @@ class TrikiApp(App):
             self.config.gyro_scale,
             self.config.accel_scale,
             self.config.startup_discard_samples,
+            sample_rate_hz=self._nominal_sample_rate(),
         )
         self.mapper = create_orientation_mapper(self.state.orientation_mode)
         self.mapper.reset_for_new_stream()
@@ -179,9 +185,15 @@ class TrikiApp(App):
             on_gatt=self._on_gatt,
             on_battery=self._on_battery,
             on_notification=self._on_notification,
+            on_led=self._on_led,
         )
         self._ble = TrikiBleClient(self.config, callbacks)
         self.run_worker(self._ble.run(), exclusive=True, name="ble")
+
+    def _nominal_sample_rate(self) -> float:
+        if self.config.sample_rate_hz:
+            return self.config.sample_rate_hz
+        return sample_rate_from_start_command(self.config.start_command) or DEFAULT_SAMPLE_RATE_HZ
 
     def action_show_tab(self, tab: str) -> None:
         self.query_one(TabbedContent).active = tab
@@ -219,8 +231,8 @@ class TrikiApp(App):
         if self._ble is None or self.state.conn_state != "connected":
             self._log("LED: connect first.")
             return
-        self._led_on = not self._led_on
-        self.run_worker(self._ble.set_led(self._led_on), exclusive=False, name="led")
+        # The displayed state changes only once the device confirms (via _on_led).
+        self.run_worker(self._ble.set_led(not self._led_on), exclusive=False, name="led")
 
     def action_disconnect(self) -> None:
         if self._ble is not None:
@@ -247,7 +259,11 @@ class TrikiApp(App):
             self.recorder.stop()
             self._log(f"Recording stopped: {self.recorder.csv_path}")
         else:
-            self.recorder.start()
+            try:
+                self.recorder.start()
+            except OSError as exc:
+                self._log(f"Cannot start recording: {exc}")
+                return
             self._log(f"Recording to {self.recorder.csv_path}")
 
     def on_unmount(self) -> None:
@@ -268,6 +284,7 @@ class TrikiApp(App):
             self._connect_mono = time.monotonic()
         elif state in ("disconnected", "error"):
             self._connect_mono = None
+            self._led_on = False  # unknown until the next connect reads it back
         if self.recorder.is_recording:
             self.recorder.log_event(f"connection state: {state}")
 
@@ -284,6 +301,9 @@ class TrikiApp(App):
 
     def _on_battery(self, level: int) -> None:
         self.state.battery = level
+
+    def _on_led(self, on: bool) -> None:
+        self._led_on = on
 
     def _on_notification(self, data: bytes, timestamp: datetime) -> None:
         if self.processor is None:
@@ -543,6 +563,7 @@ class TrikiApp(App):
             stats_table.add_row("Samples written", str(stats.written_sample_count))
             stats_table.add_row("Startup discarded", str(stats.discarded_startup_sample_count))
             stats_table.add_row("Dropped bytes", str(stats.dropped_byte_count))
+            stats_table.add_row("Resyncs", str(self.processor.resync_count))
             stats_table.add_row("Notif gap last", f"{stats.last_notification_gap_ms:.1f} ms")
             stats_table.add_row("Notif gap max", f"{stats.max_notification_gap_ms:.1f} ms")
             stats_table.add_row("Sample rate", f"{self._sample_rate:.1f} Hz")

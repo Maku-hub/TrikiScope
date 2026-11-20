@@ -5,6 +5,26 @@ Wszystkie istotne zmiany w projekcie są dokumentowane w tym pliku.
 Format oparty na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/),
 a projekt stosuje [wersjonowanie semantyczne](https://semver.org/lang/pl/).
 
+## [Unreleased]
+
+### Naprawione
+- **Czas próbek** — próbki z jednej notyfikacji BLE dostawały ten sam znacznik czasu,
+  przez co filtry orientacji i fizyka gier całkowały 1,6–2,6× za dużo czasu (zależnie
+  od interwału połączenia). Nowy `SampleClock` rozkłada próbki równomiernie wg
+  częstotliwości IMU (nominalnej z komendy startowej, potem mierzonej), a mappery
+  orientacji ignorują kroki `dt` > 100 ms.
+- **Resynchronizacja ramek** — po utracie synchronizacji parser mógł zaczepić się
+  o fałszywy nagłówek `22 00` w danych (wartość surowa 34) i emitować przesunięte
+  ramki. Granica ramki jest teraz przyjmowana dopiero po potwierdzeniu kolejnymi
+  nagłówkami; licznik resynchronizacji widoczny w zakładce IMU.
+- **Nagrywanie** — ponowne rozpoczęcie nagrywania nie nadpisuje już poprzedniego
+  pliku CSV (kolejne pliki dostają znacznik czasu w nazwie); błąd otwarcia pliku
+  nie wywraca aplikacji.
+- **Rozłączanie** — klawisz `d` przerywa trwające skanowanie, łączenie i odczyt GATT
+  zamiast czekać na ich zakończenie.
+- **Dioda LED** — stan odczytywany z urządzenia po połączeniu i zmieniany w UI dopiero
+  po udanym zapisie.
+
 ## [1.0.0] - 2026-06-18
 
 Pierwsze stabilne wydanie. TrikiScope jest funkcjonalnie kompletny: łączy się z

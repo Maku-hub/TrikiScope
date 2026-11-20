@@ -18,6 +18,7 @@ callables in :class:`BleCallbacks`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
@@ -98,6 +99,8 @@ class BleCallbacks:
     on_gatt: Callable[[List[GattServiceInfo]], None]
     on_battery: Callable[[int], None]
     on_notification: Callable[[bytes, datetime], None]
+    on_led: Callable[[bool], None] = lambda _on: None
+    """LED state as read from the device on connect, and after each successful write."""
 
 
 # Standard SIG UUIDs we read during device-info collection.
@@ -119,6 +122,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _StopRequested(Exception):
+    """Raised inside :meth:`TrikiBleClient.run` when :meth:`stop` interrupts a step."""
+
+
 class TrikiBleClient:
     def __init__(self, config: AppConfig, callbacks: BleCallbacks) -> None:
         self._config = config
@@ -138,14 +145,15 @@ class TrikiBleClient:
                 self._cb.on_log(
                     "No matching device found. Press the button on Triki to wake it, then retry."
                 )
-                self._cb.on_state("disconnected")
-                return
+                return  # _cleanup() reports "disconnected"
             if adv is not None:
                 self._emit_advertisement(device, adv)
 
             self._cb.on_state("connecting")
             self._cb.on_log(f"Connecting to {device.name or '?'} ({device.address})...")
             await self._connect(device)
+        except _StopRequested:
+            self._cb.on_log("Stopped.")
         except asyncio.CancelledError:
             self._cb.on_log("Cancelled.")
             raise
@@ -156,18 +164,45 @@ class TrikiBleClient:
             await self._cleanup()
 
     def stop(self) -> None:
+        """Request shutdown; also interrupts an ongoing scan / connect / setup."""
         self._stop_event.set()
 
-    async def set_led(self, on: bool) -> None:
-        """Turn the device LED on/off via the vendor characteristic (bit 0)."""
+    async def set_led(self, on: bool) -> bool:
+        """Turn the device LED on/off via the vendor characteristic (bit 0).
+
+        Returns True on success; the confirmed state is reported via ``on_led``.
+        """
         if self._client is None or not self._client.is_connected:
             self._cb.on_log("Cannot set LED: not connected.")
-            return
+            return False
         try:
             await self._client.write_gatt_char(LED_CHAR_UUID, bytes([1 if on else 0]), response=True)
-            self._cb.on_log(f"LED {'on' if on else 'off'}.")
         except Exception as exc:  # noqa: BLE001
             self._cb.on_log(f"LED write failed: {exc}")
+            return False
+        self._cb.on_log(f"LED {'on' if on else 'off'}.")
+        self._cb.on_led(on)
+        return True
+
+    async def _unless_stopped(self, awaitable):
+        """Await ``awaitable`` but abandon it (raising _StopRequested) once stop() is called."""
+        if self._stop_event.is_set():
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
+            raise _StopRequested
+        task = asyncio.ensure_future(awaitable)
+        stopper = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            await asyncio.wait({task, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopper.cancel()
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+        if task.cancelled():
+            raise _StopRequested
+        return task.result()
 
     # -- scanning --------------------------------------------------------------
 
@@ -177,7 +212,7 @@ class TrikiBleClient:
             f"Scanning up to {self._config.scan_timeout_seconds:.0f}s for a name containing "
             f"'{self._config.device_name}'..."
         )
-        found: asyncio.Future = asyncio.get_event_loop().create_future()
+        found: asyncio.Future = asyncio.get_running_loop().create_future()
         name_needle = self._config.device_name.lower()
 
         def detection(device: BLEDevice, adv: AdvertisementData) -> None:
@@ -188,7 +223,9 @@ class TrikiBleClient:
         scanner = BleakScanner(detection_callback=detection)
         await scanner.start()
         try:
-            result = await asyncio.wait_for(found, timeout=self._config.scan_timeout_seconds)
+            result = await self._unless_stopped(
+                asyncio.wait_for(found, timeout=self._config.scan_timeout_seconds)
+            )
         except asyncio.TimeoutError:
             self._cb.on_log("Scan timed out.")
             result = (None, None)
@@ -216,11 +253,12 @@ class TrikiBleClient:
             self._stop_event.set()
 
         self._client = BleakClient(device, disconnected_callback=on_disconnect)
-        await self._client.connect()
+        await self._unless_stopped(self._client.connect())
         self._cb.on_state("connected")
         self._cb.on_log("Connected.")
 
-        await self._enumerate_gatt(None)
+        await self._unless_stopped(self._enumerate_gatt(None))
+        self._emit_led_state()
         # Read MTU after some GATT traffic: WinRT often still reports the default
         # ATT MTU (23) immediately after connect and only updates once negotiated.
         mtu = getattr(self._client, "mtu_size", None)
@@ -338,13 +376,18 @@ class TrikiBleClient:
                 self._cb.on_log(
                     f"Keep Triki still. Starting stream in {self._config.settle_delay_seconds:.0f}s..."
                 )
-                await asyncio.sleep(self._config.settle_delay_seconds)
+                await self._unless_stopped(asyncio.sleep(self._config.settle_delay_seconds))
             rx = self._find_char(NUS_RX_CHAR_UUID)
             if rx is None:
                 self._cb.on_log("NUS RX characteristic not found - cannot send start command.")
                 return
             await self._client.write_gatt_char(rx, self._config.start_command, response=False)
             self._cb.on_log(f"Wrote start command: {g.hexdump(self._config.start_command)}")
+
+    def _emit_led_state(self) -> None:
+        value = self._char_values.get(LED_CHAR_UUID.lower())
+        if value:
+            self._cb.on_led(bool(value[0] & 0x01))
 
     def _find_char(self, uuid: str):
         if self._client is None:

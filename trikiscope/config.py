@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional
 
 
 # Nordic UART Service (NUS) UUIDs used by the Triki device.
@@ -33,6 +34,9 @@ class AppConfig:
     settle_delay_seconds: float = 0.0
     startup_discard_samples: int = 20
     """Frames dropped at the start of a stream (device emits noise on wake)."""
+
+    sample_rate_hz: Optional[float] = None
+    """Nominal IMU output rate; None = taken from the start command (fallback 104 Hz)."""
 
     auto_start_stream: bool = True
     auto_connect: bool = False

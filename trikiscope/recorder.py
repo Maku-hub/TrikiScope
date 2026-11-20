@@ -39,7 +39,8 @@ class Recorder:
     """
 
     def __init__(self, csv_path: str, log_path: str) -> None:
-        self._csv_path = Path(csv_path)
+        self._base_csv_path = Path(csv_path)
+        self._csv_path = self._base_csv_path
         self._log_path = Path(log_path)
         self._csv_file: Optional[TextIO] = None
         self._csv_writer = None
@@ -50,10 +51,17 @@ class Recorder:
     def start(self) -> None:
         if self.is_recording:
             return
-        self._csv_file = self._csv_path.open("w", newline="", encoding="utf-8")
+        self._csv_path = self._next_free_csv_path()
+        # "x" = exclusive create: never truncate an earlier recording.
+        self._csv_file = self._csv_path.open("x", newline="", encoding="utf-8")
+        try:
+            self._log_file = self._log_path.open("a", encoding="utf-8")
+        except OSError:
+            self._csv_file.close()
+            self._csv_file = None
+            raise
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow(CSV_HEADER)
-        self._log_file = self._log_path.open("a", encoding="utf-8")
         self.sample_count = 0
         self.is_recording = True
         self.log_event(f"Recording started -> {self._csv_path}")
@@ -112,6 +120,19 @@ class Recorder:
             self._log_file.flush()
             self._log_file.close()
             self._log_file = None
+
+    def _next_free_csv_path(self) -> Path:
+        """The configured path if unused, else ``<stem>_<YYYYmmdd-HHMMSS>[_N]<suffix>``."""
+        base = self._base_csv_path
+        if not base.exists():
+            return base
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = base.with_name(f"{base.stem}_{stamp}{base.suffix}")
+        n = 2
+        while candidate.exists():
+            candidate = base.with_name(f"{base.stem}_{stamp}_{n}{base.suffix}")
+            n += 1
+        return candidate
 
     @property
     def csv_path(self) -> str:

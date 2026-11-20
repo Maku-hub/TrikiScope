@@ -215,8 +215,9 @@ class VisualOrientationMapper:
     def __init__(
         self,
         gyro_gain: float = 2.5,
-        fallback_dt: float = 0.02,
+        fallback_dt: float = 0.01,
         minimum_dt: float = 0.001,
+        maximum_dt: float = 0.1,
         beta: float = 1.5,
         smoothing_factor: float = 0.35,
         visual_deadband_degrees: float = 8.0,
@@ -225,6 +226,7 @@ class VisualOrientationMapper:
         self._gyro_gain = gyro_gain
         self._fallback_dt = fallback_dt
         self._minimum_dt = minimum_dt
+        self._maximum_dt = maximum_dt
         self._smoothing_factor = smoothing_factor
         self._visual_deadband_degrees = visual_deadband_degrees
 
@@ -245,7 +247,9 @@ class VisualOrientationMapper:
         dt = self._fallback_dt
         if self._last_ts is not None:
             dt = (sample.timestamp_utc - self._last_ts).total_seconds()
-            if dt <= self._minimum_dt:
+            # Out-of-range steps (first sample after a stall, clock jump) would
+            # integrate a huge rotation from a single gyro reading.
+            if dt <= self._minimum_dt or dt > self._maximum_dt:
                 dt = self._fallback_dt
         self._last_ts = sample.timestamp_utc
 
@@ -359,8 +363,9 @@ class ComplementaryTiltOrientationMapper:
     def __init__(
         self,
         gyro_gain: float = 1.0,
-        fallback_dt: float = 0.02,
+        fallback_dt: float = 0.01,
         minimum_dt: float = 0.001,
+        maximum_dt: float = 0.1,
         complementary_alpha: float = 0.96,
         smoothing_factor: float = 0.35,
         visual_deadband_degrees: float = 4.0,
@@ -368,6 +373,7 @@ class ComplementaryTiltOrientationMapper:
         self._gyro_gain = gyro_gain
         self._fallback_dt = fallback_dt
         self._minimum_dt = minimum_dt
+        self._maximum_dt = maximum_dt
         self._alpha = complementary_alpha
         self._smoothing = smoothing_factor
         self._deadband = visual_deadband_degrees
@@ -443,7 +449,9 @@ class ComplementaryTiltOrientationMapper:
         dt = self._fallback_dt
         if self._last_ts is not None:
             dt = (ts - self._last_ts).total_seconds()
-            if dt <= self._minimum_dt:
+            # Out-of-range steps (first sample after a stall, clock jump) would
+            # integrate a huge rotation from a single gyro reading.
+            if dt <= self._minimum_dt or dt > self._maximum_dt:
                 dt = self._fallback_dt
         self._last_ts = ts
         return dt

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from trikiscope.protocol import (
+    RESYNC_CONFIRM_FRAMES,
     BleNotificationProcessor,
     FrameParser,
     ImuSample,
@@ -33,9 +34,18 @@ def test_parser_resyncs_after_garbage():
     parser = FrameParser()
     frame = make_frame(1, 2, 3, 4, 5, 6)
     garbage = b"\xde\xad\xbe\xef"
-    frames = list(parser.push(garbage + frame))
-    assert len(frames) == 1
+    # After sync loss a boundary is accepted only once confirmed by following frames.
+    frames = list(parser.push(garbage + frame * RESYNC_CONFIRM_FRAMES))
+    assert frames == [frame] * RESYNC_CONFIRM_FRAMES
     assert parser.dropped_byte_count == len(garbage)
+    assert parser.resync_count == 1
+
+
+def test_parser_waits_for_confirmation_after_sync_loss():
+    parser = FrameParser()
+    frame = make_frame(1, 2, 3, 4, 5, 6)
+    assert list(parser.push(b"\x01\x02" + frame)) == []
+    assert list(parser.push(frame * (RESYNC_CONFIRM_FRAMES - 1))) == [frame] * RESYNC_CONFIRM_FRAMES
 
 
 def test_parser_handles_split_across_chunks():
@@ -53,9 +63,10 @@ def test_parser_keeps_trailing_header_byte():
     # A lone 0x22 at the end may be the first byte of a header split across chunks.
     list(parser.push(b"\x01\x02\x22"))
     frame = make_frame(1, 1, 1, 1, 1, 1)
-    # Supply the rest: 0x00 + remaining 12 bytes.
-    frames = list(parser.push(b"\x00" + frame[2:]))
-    assert len(frames) == 1
+    # Supply the rest: 0x00 + remaining 12 bytes (+ confirming frames).
+    frames = list(parser.push(frame[1:] + frame * (RESYNC_CONFIRM_FRAMES - 1)))
+    assert frames == [frame] * RESYNC_CONFIRM_FRAMES
+    assert parser.dropped_byte_count == 2
 
 
 def test_parser_extracts_multiple_frames_in_burst():
@@ -121,9 +132,29 @@ def test_parser_ignores_non_status_second_byte():
     # 0x22 followed by something other than 0x00/0x01 is not a frame header.
     parser = FrameParser()
     frame = make_frame(1, 1, 1, 1, 1, 1)
-    frames = list(parser.push(b"\x22\x55\x99" + frame))
-    assert len(frames) == 1
-    assert frames[0] == frame
+    frames = list(parser.push(b"\x22\x55\x99" + frame * RESYNC_CONFIRM_FRAMES))
+    assert frames == [frame] * RESYNC_CONFIRM_FRAMES
+
+
+def test_parser_does_not_lock_onto_header_inside_payload():
+    # At rest gyro X = 34 raw encodes as "22 00" - a fake header at offset 2 of
+    # every frame.  Joining the stream mid-frame must still find the real boundary.
+    frame = make_frame(34, -5, 3, 12, -20, 2048)
+    parser = FrameParser()
+    frames = list(parser.push((frame * 20)[1:]))
+    assert frames, "parser never resynchronised"
+    assert all(f == frame for f in frames)
+
+
+def test_parser_recovers_from_lost_bytes_mid_stream():
+    frames_in = [make_frame(34, i, 0, 0, 0, 2048) for i in range(30)]
+    stream = b"".join(frames_in)
+    parser = FrameParser()
+    out = list(parser.push(stream[:70]))  # 5 clean frames
+    out += list(parser.push(stream[75:]))  # 5 bytes lost (as if part of a notification vanished)
+    assert out[:5] == frames_in[:5]
+    assert set(out[5:]) <= set(frames_in), "a misaligned (garbage) frame was emitted"
+    assert out[-1] == frames_in[-1]
 
 
 def test_notification_gap_tracking():
