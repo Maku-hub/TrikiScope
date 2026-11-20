@@ -29,6 +29,19 @@ def sparkline(values: Sequence[float], width: int, vmin: float | None = None, vm
     return "".join(out).rjust(width)
 
 
+def downsample_peaks(values: Sequence[float], width: int) -> List[float]:
+    """Squeeze ``values`` into at most ``width`` points, keeping each bucket's peak.
+
+    The value with the largest magnitude represents its bucket, so short spikes
+    (taps, flicks) stay visible when a long history is drawn in a narrow chart.
+    """
+    data = list(values)
+    n = len(data)
+    if width <= 0 or n <= width:
+        return data
+    return [max(data[i * n // width:(i + 1) * n // width], key=abs) for i in range(width)]
+
+
 # Cube geometry: 8 vertices, 12 edges.
 _CUBE_VERTICES = [
     (-1, -1, -1),

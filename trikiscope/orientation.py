@@ -205,12 +205,77 @@ def _normalize_angle(angle: float) -> float:
     return angle
 
 
+class AutoZero:
+    """Auto-zero bookkeeping shared by the mappers, plus a gyro bias estimate.
+
+    After ``minimum`` samples it waits for ``stable_window`` consecutive still
+    samples (or gives up after ``maximum``).  The mean gyro reading over that
+    still run is the zero-rate offset (bias) the mappers subtract; a timed-out
+    calibration keeps the previous bias.
+    """
+
+    GYRO_STILL_DPS = 5.0  # raw (uncorrected) gyro magnitude; LSM6DSL zero-rate offset is ~±2 dps
+    MIN_ACCEL_G = 0.85
+    MAX_ACCEL_G = 1.15
+
+    def __init__(self) -> None:
+        self.pending = False
+        self.bias: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.measured = False
+        """Whether the last finished calibration measured the bias (False = timed out)."""
+        self._minimum = self._required = self._maximum = 0
+        self._count = 0
+        self._stable = 0
+        self._sum = [0.0, 0.0, 0.0]
+
+    def start(self, minimum: int, stable_window: int, maximum: int) -> None:
+        self.pending = True
+        self._minimum, self._required, self._maximum = minimum, stable_window, maximum
+        self._count = 0
+        self._restart_run()
+
+    def cancel(self) -> None:
+        self.pending = False
+
+    def feed(self, sample: ImuSample) -> bool:
+        """Account one sample; True when calibration finishes on it."""
+        self._count += 1
+        if self._count > self._minimum:
+            if self.is_still(sample):
+                self._stable += 1
+                self._sum[0] += sample.gyro_x
+                self._sum[1] += sample.gyro_y
+                self._sum[2] += sample.gyro_z
+            else:
+                self._restart_run()
+        settled = self._stable >= self._required
+        if not settled and self._count < self._maximum:
+            return False
+        self.measured = settled and self._stable > 0
+        if self.measured:
+            n = self._stable
+            self.bias = (self._sum[0] / n, self._sum[1] / n, self._sum[2] / n)
+        self.pending = False
+        return True
+
+    def is_still(self, sample: ImuSample) -> bool:
+        if sample.gyro_magnitude > self.GYRO_STILL_DPS:
+            return False
+        return self.MIN_ACCEL_G <= sample.accel_magnitude <= self.MAX_ACCEL_G
+
+    def _restart_run(self) -> None:
+        self._stable = 0
+        self._sum = [0.0, 0.0, 0.0]
+
+
+# Calibration window, in samples (~109 Hz): settle 0.5 s, need 0.3 s still, give up at 2.3 s.
+AUTO_ZERO_MINIMUM = 50
+AUTO_ZERO_STABLE = 30
+AUTO_ZERO_MAXIMUM = 250
+
+
 class VisualOrientationMapper:
     """Madgwick-based orientation with auto-zero, slerp smoothing and dead-band."""
-
-    _AUTO_ZERO_GYRO_STILL_THRESHOLD = 2.0
-    _AUTO_ZERO_MIN_ACCEL = 0.85
-    _AUTO_ZERO_MAX_ACCEL = 1.15
 
     def __init__(
         self,
@@ -234,12 +299,7 @@ class VisualOrientationMapper:
         self._offset = Quaternion.identity()
         self._smoothed = Quaternion.identity()
         self._is_first_sample = True
-        self._auto_zero_pending = False
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
-        self._auto_zero_min = 0
-        self._auto_zero_required_stable = 0
-        self._auto_zero_max = 0
+        self._auto_zero = AutoZero()
         self.yaw = 0.0
         self.calibrating = False
 
@@ -253,17 +313,18 @@ class VisualOrientationMapper:
                 dt = self._fallback_dt
         self._last_ts = sample.timestamp_utc
 
-        gx = sample.gyro_x * self._gyro_gain * _DEG2RAD
-        gy = sample.gyro_y * self._gyro_gain * _DEG2RAD
+        bx, by, bz = self._auto_zero.bias
+        gx = (sample.gyro_x - bx) * self._gyro_gain * _DEG2RAD
+        gy = (sample.gyro_y - by) * self._gyro_gain * _DEG2RAD
         # Negate gyro-Z so a left (CCW) spin while flat rotates the visual left too.
         # Yaw is gyro-only (accel does not constrain heading), so this affects only
         # yaw direction and leaves pitch/roll unchanged.
-        gz = -sample.gyro_z * self._gyro_gain * _DEG2RAD
+        gz = -(sample.gyro_z - bz) * self._gyro_gain * _DEG2RAD
 
         self._ahrs.update(gx, gy, gz, sample.accel_x, sample.accel_y, sample.accel_z, dt)
         raw_quat = self._to_visual_quaternion(self._ahrs.q)
 
-        if self._auto_zero_pending:
+        if self._auto_zero.pending:
             return self._update_auto_zero(sample, raw_quat)
 
         target = self._apply_visual_deadband(self._offset * raw_quat)
@@ -278,18 +339,24 @@ class VisualOrientationMapper:
         self.yaw = yaw
         return VisualOrientation(pitch, roll, yaw, self._smoothed)
 
-    def reset_for_new_stream(self, minimum=50, stable_window=10, maximum=200) -> None:
+    @property
+    def gyro_bias(self) -> tuple[float, float, float]:
+        return self._auto_zero.bias
+
+    @property
+    def bias_measured(self) -> bool:
+        return self._auto_zero.measured
+
+    def reset_for_new_stream(
+        self, minimum=AUTO_ZERO_MINIMUM, stable_window=AUTO_ZERO_STABLE, maximum=AUTO_ZERO_MAXIMUM
+    ) -> None:
+        """Restart the filter and re-calibrate (zero pose + gyro bias)."""
         self._ahrs.reset()
         self._last_ts = None
         self._offset = Quaternion.identity()
         self._smoothed = Quaternion.identity()
         self._is_first_sample = True
-        self._auto_zero_pending = True
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
-        self._auto_zero_min = minimum
-        self._auto_zero_required_stable = stable_window
-        self._auto_zero_max = maximum
+        self._auto_zero.start(minimum, stable_window, maximum)
         self.yaw = 0.0
         self.calibrating = True
 
@@ -298,37 +365,19 @@ class VisualOrientationMapper:
         self._offset = current.inverse()
         self._smoothed = Quaternion.identity()
         self._is_first_sample = True
-        self._auto_zero_pending = False
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
+        self._auto_zero.cancel()
         self.yaw = 0.0
         self.calibrating = False
 
     def _update_auto_zero(self, sample: ImuSample, raw_quat: Quaternion) -> VisualOrientation:
         self.calibrating = True
-        self._auto_zero_count += 1
-        if self._auto_zero_count > self._auto_zero_min:
-            if self._is_still(sample):
-                self._auto_zero_stable_count += 1
-            else:
-                self._auto_zero_stable_count = 0
-        if (
-            self._auto_zero_stable_count >= self._auto_zero_required_stable
-            or self._auto_zero_count >= self._auto_zero_max
-        ):
+        if self._auto_zero.feed(sample):
             self._offset = raw_quat.inverse()
             self._smoothed = Quaternion.identity()
             self._is_first_sample = True
-            self._auto_zero_pending = False
             self.calibrating = False
         self.yaw = 0.0
         return VisualOrientation(0.0, 0.0, 0.0, Quaternion.identity())
-
-    def _is_still(self, sample: ImuSample) -> bool:
-        if sample.gyro_magnitude > self._AUTO_ZERO_GYRO_STILL_THRESHOLD:
-            return False
-        mag = sample.accel_magnitude
-        return self._AUTO_ZERO_MIN_ACCEL <= mag <= self._AUTO_ZERO_MAX_ACCEL
 
     @staticmethod
     def _to_visual_quaternion(q: List[float]) -> Quaternion:
@@ -356,10 +405,6 @@ class VisualOrientationMapper:
 class ComplementaryTiltOrientationMapper:
     """Gyro/accel complementary filter producing pitch/roll/yaw directly."""
 
-    _AUTO_ZERO_GYRO_STILL_THRESHOLD = 2.0
-    _AUTO_ZERO_MIN_ACCEL = 0.85
-    _AUTO_ZERO_MAX_ACCEL = 1.15
-
     def __init__(
         self,
         gyro_gain: float = 1.0,
@@ -383,12 +428,7 @@ class ComplementaryTiltOrientationMapper:
         self._pitch_off = self._roll_off = self._yaw_off = 0.0
         self._disp_pitch = self._disp_roll = self._disp_yaw = 0.0
         self._is_first_display = True
-        self._auto_zero_pending = False
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
-        self._auto_zero_min = 0
-        self._auto_zero_required_stable = 0
-        self._auto_zero_max = 0
+        self._auto_zero = AutoZero()
         self.yaw = 0.0
         self.calibrating = False
 
@@ -396,7 +436,7 @@ class ComplementaryTiltOrientationMapper:
         dt = self._dt(sample.timestamp_utc)
         self._update_angles(sample, dt)
 
-        if self._auto_zero_pending:
+        if self._auto_zero.pending:
             return self._update_auto_zero(sample)
 
         target_pitch = self._deadband_angle(_normalize_angle(self._pitch - self._pitch_off))
@@ -422,27 +462,31 @@ class ComplementaryTiltOrientationMapper:
 
         return self._to_orientation(self._disp_pitch, self._disp_roll, self._disp_yaw)
 
-    def reset_for_new_stream(self, minimum=50, stable_window=10, maximum=200) -> None:
+    @property
+    def gyro_bias(self) -> tuple[float, float, float]:
+        return self._auto_zero.bias
+
+    @property
+    def bias_measured(self) -> bool:
+        return self._auto_zero.measured
+
+    def reset_for_new_stream(
+        self, minimum=AUTO_ZERO_MINIMUM, stable_window=AUTO_ZERO_STABLE, maximum=AUTO_ZERO_MAXIMUM
+    ) -> None:
+        """Restart the filter and re-calibrate (zero pose + gyro bias)."""
         self._last_ts = None
         self._pitch = self._roll = self._yaw = 0.0
         self._pitch_off = self._roll_off = self._yaw_off = 0.0
         self._disp_pitch = self._disp_roll = self._disp_yaw = 0.0
         self._is_first_display = True
-        self._auto_zero_pending = True
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
-        self._auto_zero_min = minimum
-        self._auto_zero_required_stable = stable_window
-        self._auto_zero_max = maximum
+        self._auto_zero.start(minimum, stable_window, maximum)
         self.calibrating = True
 
     def reset(self) -> None:
         self._pitch_off, self._roll_off, self._yaw_off = self._pitch, self._roll, self._yaw
         self._disp_pitch = self._disp_roll = self._disp_yaw = 0.0
         self._is_first_display = True
-        self._auto_zero_pending = False
-        self._auto_zero_count = 0
-        self._auto_zero_stable_count = 0
+        self._auto_zero.cancel()
         self.calibrating = False
 
     def _dt(self, ts: datetime) -> float:
@@ -457,9 +501,10 @@ class ComplementaryTiltOrientationMapper:
         return dt
 
     def _update_angles(self, sample: ImuSample, dt: float) -> None:
-        gyro_pitch = self._pitch + sample.gyro_y * self._gyro_gain * dt
-        gyro_roll = self._roll - sample.gyro_x * self._gyro_gain * dt
-        self._yaw = _normalize_angle(self._yaw - sample.gyro_z * self._gyro_gain * dt)
+        bx, by, bz = self._auto_zero.bias
+        gyro_pitch = self._pitch + (sample.gyro_y - by) * self._gyro_gain * dt
+        gyro_roll = self._roll - (sample.gyro_x - bx) * self._gyro_gain * dt
+        self._yaw = _normalize_angle(self._yaw - (sample.gyro_z - bz) * self._gyro_gain * dt)
 
         tilt = self._accel_tilt(sample)
         if tilt is not None:
@@ -484,28 +529,12 @@ class ComplementaryTiltOrientationMapper:
 
     def _update_auto_zero(self, sample: ImuSample) -> VisualOrientation:
         self.calibrating = True
-        self._auto_zero_count += 1
-        if self._auto_zero_count > self._auto_zero_min:
-            if self._is_still(sample):
-                self._auto_zero_stable_count += 1
-            else:
-                self._auto_zero_stable_count = 0
-        if (
-            self._auto_zero_stable_count >= self._auto_zero_required_stable
-            or self._auto_zero_count >= self._auto_zero_max
-        ):
+        if self._auto_zero.feed(sample):
             self._pitch_off, self._roll_off, self._yaw_off = self._pitch, self._roll, self._yaw
             self._disp_pitch = self._disp_roll = self._disp_yaw = 0.0
             self._is_first_display = True
-            self._auto_zero_pending = False
             self.calibrating = False
         return self._to_orientation(0.0, 0.0, 0.0)
-
-    def _is_still(self, sample: ImuSample) -> bool:
-        if sample.gyro_magnitude > self._AUTO_ZERO_GYRO_STILL_THRESHOLD:
-            return False
-        mag = sample.accel_magnitude
-        return self._AUTO_ZERO_MIN_ACCEL <= mag <= self._AUTO_ZERO_MAX_ACCEL
 
     def _deadband_angle(self, angle: float) -> float:
         if self._deadband <= 0.0:

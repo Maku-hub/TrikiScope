@@ -132,6 +132,52 @@ def test_complementary_angles_stay_in_range():
     assert -180.0 <= out.yaw <= 180.0
 
 
+BIAS = (0.8, -0.5, 1.2)  # deg/s zero-rate offset of a "real" sensor
+
+
+def _still_with_bias(t):
+    # +1 g on Z is Madgwick's resting pose, so the filter has nothing to converge
+    # and any yaw change can only come from integrating the gyro bias.
+    return make_sample(BIAS[0], BIAS[1], BIAS[2], 0.0, 0.0, 1.0, t)
+
+
+def _yaw_after(mapper, seconds: float) -> float:
+    t = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    out = None
+    for _ in range(int(seconds * 100)):
+        t += timedelta(milliseconds=10)
+        out = mapper.update(_still_with_bias(t))
+    return out.yaw
+
+
+def test_auto_zero_estimates_gyro_bias_and_stops_yaw_drift():
+    for mapper in (VisualOrientationMapper(visual_deadband_degrees=0.0),
+                   ComplementaryTiltOrientationMapper(visual_deadband_degrees=0.0)):
+        mapper.reset_for_new_stream()
+        yaw = _yaw_after(mapper, 10.0)
+        assert mapper.calibrating is False
+        assert mapper.bias_measured is True
+        assert all(math.isclose(b, e, abs_tol=1e-9) for b, e in zip(mapper.gyro_bias, BIAS))
+        # Uncorrected, 1.2 deg/s for ~8 s would have drifted ~10 deg.
+        assert abs(yaw) < 0.5, type(mapper).__name__
+
+
+def test_bias_kept_when_calibration_times_out():
+    mapper = ComplementaryTiltOrientationMapper()
+    mapper.reset_for_new_stream()
+    _yaw_after(mapper, 5.0)
+    learned = mapper.gyro_bias
+    # Recalibrate while the device keeps moving: no still window -> keep the old bias.
+    mapper.reset_for_new_stream(minimum=0, stable_window=10, maximum=20)
+    t = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    for _ in range(30):
+        t += timedelta(milliseconds=10)
+        mapper.update(make_sample(90.0, 0.0, 0.0, 0.0, 0.0, -1.0, t))
+    assert mapper.calibrating is False
+    assert mapper.bias_measured is False
+    assert mapper.gyro_bias == learned
+
+
 def test_factory():
     assert isinstance(create_orientation_mapper("madgwick"), VisualOrientationMapper)
     assert isinstance(create_orientation_mapper("complementary"), ComplementaryTiltOrientationMapper)

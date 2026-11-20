@@ -91,7 +91,7 @@ class TrikiApp(App):
         self.games: List[Game] = build_games()
         self._active_game_index = 0
 
-        maxlen = max(120, int(config.history_seconds * 110))
+        maxlen = max(120, int(config.history_seconds * 115))
         self._gyro_x: Deque[float] = deque(maxlen=maxlen)
         self._gyro_y: Deque[float] = deque(maxlen=maxlen)
         self._gyro_z: Deque[float] = deque(maxlen=maxlen)
@@ -110,6 +110,10 @@ class TrikiApp(App):
         self._button_pressed = False
         self._button_press_count = 0
         self._led_on = False
+        # Last content key rendered into each slow-changing widget (skip identical redraws).
+        self._render_keys: dict[str, object] = {}
+        self._info_version = 0  # bumped when advertisement / device info changes
+        self._gatt_version = 0
 
     # -- layout ----------------------------------------------------------------
 
@@ -290,14 +294,17 @@ class TrikiApp(App):
 
     def _on_advertisement(self, adv: AdvertisementInfo) -> None:
         self.state.advertisement = adv
+        self._info_version += 1
 
     def _on_device_info(self, info: DeviceInfo) -> None:
         self.state.device_info = info
+        self._info_version += 1
         if info.battery_percent is not None:
             self.state.battery = info.battery_percent
 
     def _on_gatt(self, services: List[GattServiceInfo]) -> None:
         self.state.gatt = services
+        self._gatt_version += 1
 
     def _on_battery(self, level: int) -> None:
         self.state.battery = level
@@ -317,7 +324,10 @@ class TrikiApp(App):
             orientation = self.mapper.update(sample)
             self.state.last_sample = sample
             self.state.orientation = orientation
+            was_calibrating = self.state.calibrating
             self.state.calibrating = getattr(self.mapper, "calibrating", False)
+            if was_calibrating and not self.state.calibrating:
+                self._log_calibration_result()
             self._peak_gyro = max(self._peak_gyro, sample.gyro_magnitude)
             self._peak_accel = max(self._peak_accel, sample.accel_magnitude)
             if game is not None:
@@ -347,6 +357,14 @@ class TrikiApp(App):
                     sample, orientation.pitch, orientation.roll, orientation.yaw
                 )
 
+    def _log_calibration_result(self) -> None:
+        bx, by, bz = self.mapper.gyro_bias
+        bias = f"x={bx:+.2f} y={by:+.2f} z={bz:+.2f} deg/s"
+        if self.mapper.bias_measured:
+            self._log(f"Calibrated. Gyro bias {bias}")
+        else:
+            self._log(f"Calibration timed out (device not still) - kept gyro bias {bias}")
+
     # -- rendering -------------------------------------------------------------
 
     def _tick(self) -> None:
@@ -365,9 +383,9 @@ class TrikiApp(App):
 
             active = self.query_one(TabbedContent).active
             if active == "overview":
-                self.query_one("#overview-body", Static).update(self._render_overview())
+                self._update_if_changed("#overview-body", self._overview_key(), self._render_overview)
             elif active == "gatt":
-                self.query_one("#gatt-body", Static).update(self._render_gatt())
+                self._update_if_changed("#gatt-body", self._gatt_version, self._render_gatt)
             elif active == "imu":
                 self.query_one("#imu-body", Static).update(self._render_imu())
             elif active == "orient":
@@ -376,6 +394,26 @@ class TrikiApp(App):
                 self.query_one("#games-body", Static).update(self._render_games())
         except NoMatches:
             return
+
+    def _update_if_changed(self, selector: str, key: object, build) -> None:
+        """Re-render a mostly static panel only when its displayed content changes."""
+        if self._render_keys.get(selector) == key:
+            return
+        self._render_keys[selector] = key
+        self.query_one(selector, Static).update(build())
+
+    def _overview_key(self) -> tuple:
+        # Everything _render_overview shows, at display precision.
+        return (
+            self.state.conn_state,
+            self._uptime_text(),
+            round(self._sample_rate),
+            self.state.battery,
+            self.state.orientation_mode,
+            self.recorder.is_recording,
+            self._led_on,
+            self._info_version,
+        )
 
     def _compute_rate(self) -> float:
         return self._rate_from(self._sample_times)
@@ -435,7 +473,7 @@ class TrikiApp(App):
         table.add_column()
         table.add_row("State", Text(self.state.conn_state, style=color))
         table.add_row("Uptime", self._uptime_text())
-        table.add_row("Sample rate", f"{self._sample_rate:.1f} Hz")
+        table.add_row("Sample rate", f"{self._sample_rate:.0f} Hz")
         table.add_row("Battery", "--" if self.state.battery is None else f"{self.state.battery}%")
         table.add_row("Orientation mode", self.state.orientation_mode)
         table.add_row("Recording", "yes" if self.recorder.is_recording else "no")
@@ -548,10 +586,14 @@ class TrikiApp(App):
         charts = Table.grid(padding=(0, 2))
         charts.add_column(style="bold")
         charts.add_column()
-        charts.add_row("gyro X", Text(render.sparkline(self._gyro_x, spark_w), style="cyan"))
-        charts.add_row("gyro Y", Text(render.sparkline(self._gyro_y, spark_w), style="green"))
-        charts.add_row("gyro Z", Text(render.sparkline(self._gyro_z, spark_w), style="magenta"))
-        charts.add_row("accel |mag|", Text(render.sparkline(self._accel_mag, spark_w), style="yellow"))
+        for label, series, style in (
+            ("gyro X", self._gyro_x, "cyan"),
+            ("gyro Y", self._gyro_y, "green"),
+            ("gyro Z", self._gyro_z, "magenta"),
+            ("accel |mag|", self._accel_mag, "yellow"),
+        ):
+            peaks = render.downsample_peaks(series, spark_w)
+            charts.add_row(label, Text(render.sparkline(peaks, spark_w), style=style))
 
         stats = self.processor.stats if self.processor else None
         stats_table = Table.grid(padding=(0, 2))
@@ -603,7 +645,7 @@ class TrikiApp(App):
         return Group(
             Panel(values, title="Live IMU", border_style="cyan"),
             Panel(motion, title="Motion / gestures", border_style="red"),
-            Panel(charts, title=f"Activity (last {spark_w} samples)", border_style="green"),
+            Panel(charts, title=f"Activity (last {self.config.history_seconds:.0f} s)", border_style="green"),
             Panel(stats_table, title="Stream statistics", border_style="blue"),
             Panel(Text(frame_hex, style="dim"), title="Last decoded frame", border_style="grey50"),
         )
@@ -626,6 +668,8 @@ class TrikiApp(App):
             info.add_row("Status", "waiting for samples")
         info.add_row("Mode", self.state.orientation_mode)
         info.add_row("Calibrating", "yes (hold still)" if self.state.calibrating else "no")
+        bx, by, bz = self.mapper.gyro_bias
+        info.add_row("Gyro bias", f"x={bx:+.2f} y={by:+.2f} z={bz:+.2f} deg/s")
 
         return Group(
             Panel(cube_text, title="Orientation (wireframe)", border_style="cyan"),

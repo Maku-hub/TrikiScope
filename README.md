@@ -33,14 +33,16 @@ Bogaty dashboard w terminalu (Textual/Rich) z zakładkami:
   odczytanymi wartościami (tekst + hex). Wybrane wartości są dekodowane
   „po ludzku" (parametry połączenia, PnP ID, appearance, bateria itp.).
 - **IMU** — strumień na żywo: surowe `int16` oraz przeliczone wartości gyro
-  (deg/s) i accel (g), magnitudy, sparkline'y aktywności, statystyki strumienia
-  (liczba powiadomień, ramek, gubione bajty, przerwy, częstotliwość próbek,
+  (deg/s) i accel (g), magnitudy, sparkline'y aktywności z ostatnich 8 s (każda
+  kolumna pokazuje szczyt, więc krótkie ruchy nie giną), statystyki strumienia
+  (liczba powiadomień, ramek, gubione bajty, resynchronizacje, przerwy, częstotliwość próbek,
   histogram rozmiarów pakietów, przepustowość) oraz hex ostatniej ramki.
   Panel **Motion**: stan przycisku + licznik naciśnięć, wykryte gesty
   (TAP/IMPACT, FREE-FALL/THROW, SHAKE, SPIN) oraz szczytowe wartości gyro/accel.
 - **Orientation** — orientacja 3D liczona filtrem **Madgwick AHRS** (lub
   komplementarnym), wizualizowana obracającym się szkieletem sześcianu w ASCII,
-  kąty pitch/roll/yaw i kwaternion. Auto-kalibracja przy starcie strumienia.
+  kąty pitch/roll/yaw i kwaternion. Auto-kalibracja przy starcie strumienia
+  (pozycja zerowa + offset żyroskopu).
 - **Games** — kilka prostych gier ASCII sterowanych kapslem (na żywo, na tym
   samym strumieniu IMU): **Tilt Maze** (przechylaniem prowadzisz kulkę do celu),
   **Spin Meter** (jak najszybciej zakręć kapslem — pomiar szczytowej prędkości
@@ -172,6 +174,13 @@ Dodatkowo w usłudze NUS jest charakterystyka `6e400004-…` (read/write). Odkry
 przez eksperyment na żywo, że jej **bit 0 steruje diodą LED** na kapslu (`01` = świeci,
 `00` = zgaszona; wartość jest maskowana do 1 bitu). Klawisz `l` w aplikacji zapala/gasi LED.
 
+Przy rozłączaniu TrikiScope wysyła na RX komendę zatrzymującą strumień, taką samą jak
+aplikacja Żappka:
+
+```text
+20 00 00 00 00 00 00
+```
+
 ## Format danych IMU
 
 Dane IMU przychodzą jako ramki **14-bajtowe** z nagłówkiem `22 00`:
@@ -212,6 +221,12 @@ Orientacja jest liczona dwoma wymiennymi filtrami (przełączane klawiszem `m`):
   w spoczynku), wygładzaniem SLERP i wizualnym martwym polem.
 - **Komplementarny** — bezpośrednie pitch/roll/yaw z filtru komplementarnego
   (tryb „Zappka-like”).
+
+Podczas auto-kalibracji (start strumienia lub klawisz `z`) oba filtry mierzą też
+**offset żyroskopu**: średni odczyt w spoczynku (ok. 0,3 s bez ruchu) jest potem
+odejmowany od każdej próbki. Bez tego yaw, liczony wyłącznie z żyroskopu, dryfowałby
+o kilka stopni na minutę. Zmierzony offset widać w zakładce Orientation. Jeśli kapsel
+nie uspokoi się w ciągu ok. 2 s, kalibracja kończy się bez zmiany offsetu.
 
 ## Sprzęt
 
